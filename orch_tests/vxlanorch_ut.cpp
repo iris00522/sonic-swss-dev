@@ -483,7 +483,7 @@ namespace VxlanOrchCppTest
     }
 
 
-    TEST_F(VxlanTunnelTest, VxlanTunnelPublicMethods)
+    TEST_F(VxlanTunnelTest, NextHopRefCount)
     {
         string tunnel_name = "tunnel";
         IpAddress src_ip = IpAddress("1.1.1.1"), dst_ip = IpAddress("2.2.2.2");
