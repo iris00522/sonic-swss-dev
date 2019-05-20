@@ -308,16 +308,17 @@ namespace CrmTest
         //test case list :  IPV4_ROUTE IPV6_ROUTE IPV4_NEXTHOP IPV6_NEXTHOP 
         //                  NEXTHOP_GROUP_MEMBER NEXTHOP_GROUP FDB_ENTRY
         int used_num = 5;
+        string keys = "STATS";
 
         for (auto &i : crmResTypeNameMap){
             if(i.first == CrmResourceType::CRM_ACL_TABLE || i.first == CrmResourceType::CRM_ACL_GROUP
                || i.first == CrmResourceType::CRM_ACL_ENTRY || i.first == CrmResourceType::CRM_ACL_COUNTER)
             continue;
-            gCrmOrch->m_resourcesMap.at(i.first).countersMap["STATS"].usedCounter = used_num;
+            gCrmOrch->m_resourcesMap.at(i.first).countersMap[keys].usedCounter = used_num;
             gCrmOrch->incCrmResUsedCounter(i.first);
-            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).countersMap["STATS"].usedCounter,(used_num+1));
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).countersMap[keys].usedCounter,(used_num+1));
             gCrmOrch->decCrmResUsedCounter(i.first);
-            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).countersMap["STATS"].usedCounter,used_num);
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).countersMap[keys].usedCounter,used_num);
         }
     }
 
@@ -368,15 +369,17 @@ namespace CrmTest
                 }
 
             }
+
             // out of the sai_acl_stage_t (ingress or egress)
-            gCrmOrch->m_resourcesMap.at(k).countersMap["ACL_STATS:EGRESS:PORT"].usedCounter = used_num;
+            str = gCrmOrch->getCrmAclKey(SAI_ACL_STAGE_EGRESS, SAI_ACL_BIND_POINT_TYPE_PORT);
+            gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter = used_num;
             gCrmOrch->incCrmAclUsedCounter(k,(sai_acl_stage_t)3, SAI_ACL_BIND_POINT_TYPE_PORT);
-            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap["ACL_STATS:EGRESS:PORT"].usedCounter,used_num);
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter,used_num);
 
             // out of the sai_acl_bind_point_type_t
-            gCrmOrch->m_resourcesMap.at(k).countersMap["ACL_STATS:EGRESS:PORT"].usedCounter = used_num;
+            gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter = used_num;
             gCrmOrch->incCrmAclUsedCounter(k,SAI_ACL_STAGE_INGRESS, (_sai_acl_bind_point_type_t)12);
-            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap["ACL_STATS:EGRESS:PORT"].usedCounter,used_num);
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter,used_num);
         }
     }
 
@@ -405,13 +408,12 @@ namespace CrmTest
 
         //check default
         ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, (5 * 60));
-        {
-            //check PollingInterval
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ "polling_interval", to_string(interval) }}} };
-            consumer->addToSync(setData);
-            gCrmOrch->doTask(*consumer);
-            ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
-        }
+
+        //check PollingInterval
+        std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ "polling_interval", to_string(interval) }}} };
+        consumer->addToSync(setData);
+        gCrmOrch->doTask(*consumer);
+        ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
     }
 
     TEST_F(CrmTest, Crm_Config_thresholdType)
@@ -424,13 +426,11 @@ namespace CrmTest
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).thresholdType,CrmThresholdType::CRM_PERCENTAGE);
 
             for (auto &j : crmThreshTypeMap){
-                {
-                    //check threshold type
-                    std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, j.first }}} };
-                    consumer->addToSync(setData);
-                    gCrmOrch->doTask(*consumer);
-                    ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).thresholdType,j.second);
-                }
+                //check threshold type
+                std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, j.first }}} };
+                consumer->addToSync(setData);
+                gCrmOrch->doTask(*consumer);
+                ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).thresholdType,j.second);
             }
         }
     }
@@ -444,13 +444,12 @@ namespace CrmTest
         for (const auto &i : crmThreshLowResMap){
             //check default
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).lowThreshold,70);
-            {
-                //check low threshold
-                std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(lowThreshold) }}} };
-                consumer->addToSync(setData);
-                gCrmOrch->doTask(*consumer);
-                ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).lowThreshold,lowThreshold);
-            }
+
+            //check low threshold
+            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(lowThreshold) }}} };
+            consumer->addToSync(setData);
+            gCrmOrch->doTask(*consumer);
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).lowThreshold,lowThreshold);
         }
     }
 
@@ -463,13 +462,12 @@ namespace CrmTest
         for (const auto &i : crmThreshHighResMap){
             //check default
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).highThreshold,85);
-            {
-                //check low threshold
-                std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(highThreshold) }}} };
-                consumer->addToSync(setData);
-                gCrmOrch->doTask(*consumer);
-                ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).highThreshold,highThreshold);
-            }
+
+            //check low threshold
+            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(highThreshold) }}} };
+            consumer->addToSync(setData);
+            gCrmOrch->doTask(*consumer);
+            ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).highThreshold,highThreshold);
         }
     }
 
