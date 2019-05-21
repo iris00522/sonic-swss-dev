@@ -335,8 +335,11 @@ namespace CrmOrchTest
                     {
                         ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str1) == gCrmOrch->m_resourcesMap.at(k).countersMap.end());
                         ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str) == gCrmOrch->m_resourcesMap.at(k).countersMap.end());
-                    }else
+                    }
+                    else
+                    {
                         ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter,used_num);
+                    }
                 }
 
             }
