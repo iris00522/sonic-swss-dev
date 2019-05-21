@@ -17,33 +17,10 @@ extern "C"
 #define _countof(_Ary)  (sizeof(_Ary) / sizeof(*_Ary))
 #endif /* _countof */
 
-extern void syncd_apply_view();
-
-extern void initSaiApi();
-extern sai_switch_api_t*        sai_switch_api;
-extern sai_acl_api_t*          sai_acl_api;
-extern sai_object_id_t            gSwitchId;
-extern CrmOrch *gCrmOrch;
-
-/* Global variables */
-extern sai_object_id_t gVirtualRouterId;
-extern sai_object_id_t gUnderlayIfId;
-extern sai_object_id_t gSwitchId;
-extern MacAddress gMacAddress;
-extern MacAddress gVxlanMacAddress;
-
-extern int gBatchSize;
-
-extern bool gSairedisRecord;
-extern bool gSwssRecord;
-extern bool gLogRotate;
-extern ofstream gRecordOfs;
-extern string gRecordFile;
-
-extern uint32_t set_hostif_group_attr_count;
-extern uint32_t set_hostif_attr_count;
-extern sai_attribute_t set_hostif_group_attr_list[20];
-extern sai_attribute_t set_hostif_attr_list[20];
+extern sai_switch_api_t*    sai_switch_api;
+extern sai_acl_api_t*       sai_acl_api;
+extern sai_object_id_t      gSwitchId;
+extern CrmOrch*             gCrmOrch;
 
 const map<CrmResourceType, string> crmResTypeNameMap =
 {
@@ -171,80 +148,63 @@ const map<string, CrmResourceType> crmUsedCntsTableMap =
     { "crm_stats_fdb_entry_used", CrmResourceType::CRM_FDB_ENTRY }
 };
 
-static const char* profile_get_value(
-    _In_ sai_switch_profile_id_t profile_id,
-    _In_ const char* variable)
-{
-    // UNREFERENCED_PARAMETER(profile_id);
-
-    if (!strcmp(variable, "SAI_KEY_INIT_CONFIG_FILE")) {
-        return "/usr/share/sai_2410.xml"; // FIXME: create a json file, and passing the path into test
-    } else if (!strcmp(variable, "KV_DEVICE_MAC_ADDRESS")) {
-        return "20:03:04:05:06:00";
-    } else if (!strcmp(variable, "SAI_KEY_L3_ROUTE_TABLE_SIZE")) {
-        return "1000";
-    } else if (!strcmp(variable, "SAI_KEY_L3_NEIGHBOR_TABLE_SIZE")) {
-        return "2000";
-    } else if (!strcmp(variable, "SAI_VS_SWITCH_TYPE")) {
-        return "SAI_VS_SWITCH_TYPE_BCM56850";
-    }
-
-    return NULL;
-}
-
-static int profile_get_next_value(
-    _In_ sai_switch_profile_id_t profile_id,
-    _Out_ const char** variable,
-    _Out_ const char** value)
-{
-    if (value == NULL) {
-        return 0;
-    }
-
-    if (variable == NULL) {
-        return -1;
-    }
-
-    return -1;
-}
-
-struct TestBase: public ::testing::Test {
-    static sai_status_t sai_get_switch_attribute_(
-        _In_ sai_object_id_t switch_id,
-        _In_ uint32_t attr_count,
-        _Inout_ sai_attribute_t *attr_list)
-    {
-        return that->sai_get_switch_attribute_fn(switch_id, attr_count, attr_list);
-    }
-
-    static TestBase* that;
-
-    std::function<sai_status_t(
-        _In_ sai_object_id_t switch_id,
-        _In_ uint32_t attr_count,
-        _Inout_ sai_attribute_t *attr_list)>
-        sai_get_switch_attribute_fn;
-};
-
-TestBase* TestBase::that = nullptr;
-
-
-namespace CrmTest 
+namespace CrmOrchTest
 {
     using namespace std;
     using namespace testing;
+    static map<string, string> gProfileMap;
+    static map<string, string>::iterator gProfileIter;
 
-    class CrmTest : public TestBase
+    static const char* profile_get_value(
+        sai_switch_profile_id_t profile_id,
+        const char* variable)
+    {
+        map<string, string>::const_iterator it = gProfileMap.find(variable);
+        if (it == gProfileMap.end()) {
+            return NULL;
+        }
+
+        return it->second.c_str();
+    }
+
+    static int profile_get_next_value(
+        sai_switch_profile_id_t profile_id,
+        const char** variable,
+        const char** value)
+    {
+        if (value == NULL) {
+            gProfileIter = gProfileMap.begin();
+            return 0;
+        }
+
+        if (variable == NULL) {
+            return -1;
+        }
+
+        if (gProfileIter == gProfileMap.end()) {
+            return -1;
+        }
+
+        *variable = gProfileIter->first.c_str();
+        *value = gProfileIter->second.c_str();
+
+        gProfileIter++;
+
+        return 0;
+    }
+
+    class CrmOrchTest : public Test
     {
     public:
         std::shared_ptr<swss::DBConnector> m_config_db;
 
-        CrmTest()
+
+        CrmOrchTest()
         {
             m_config_db = std::make_shared<swss::DBConnector>(CONFIG_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
         }
 
-        ~CrmTest()
+        ~CrmOrchTest()
         {
         }
 
@@ -252,6 +212,11 @@ namespace CrmTest
         {
             sai_status_t    status;
             sai_attribute_t attr;
+
+            // Init switch and create dependencies
+
+            gProfileMap.emplace("SAI_VS_SWITCH_TYPE", "SAI_VS_SWITCH_TYPE_BCM56850");
+            gProfileMap.emplace("KV_DEVICE_MAC_ADDRESS", "20:03:04:05:06:00");
 
             static sai_service_method_table_t test_services = {
                 profile_get_value,
@@ -273,7 +238,7 @@ namespace CrmTest
 
         void TearDown()
         {
-            sai_status_t    status;
+            sai_status_t status;
 
             status = sai_switch_api->remove_switch(gSwitchId);
             ASSERT_TRUE(status == SAI_STATUS_SUCCESS);
@@ -286,14 +251,15 @@ namespace CrmTest
         }
     };
 
-    TEST_F(CrmTest, CRM_MAP)
+    TEST_F(CrmOrchTest, CRM_MAP)
     {
         ASSERT_TRUE(gCrmOrch != NULL);
         ASSERT_TRUE(gCrmOrch->m_countersDb != NULL);
         ASSERT_TRUE(gCrmOrch->m_countersCrmTable != NULL);
         ASSERT_TRUE(gCrmOrch->m_timer != NULL);
         //check default value
-        for (const auto &res : crmResTypeNameMap){
+        for (const auto &res : crmResTypeNameMap)
+        {
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(res.first).name,res.second);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(res.first).thresholdType,CrmThresholdType::CRM_PERCENTAGE);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(res.first).lowThreshold,70);
@@ -302,19 +268,19 @@ namespace CrmTest
         ASSERT_EQ(gCrmOrch->m_pollingInterval.count(),(5 * 60));
     }
 
-    TEST_F(CrmTest, ResUsedCounter)
+    TEST_F(CrmOrchTest, ResUsedCounter)
     {
-
-        //test case list :  IPV4_ROUTE IPV6_ROUTE IPV4_NEXTHOP IPV6_NEXTHOP 
-        //                  NEXTHOP_GROUP_MEMBER NEXTHOP_GROUP FDB_ENTRY
         int used_num = 5;
         string keys = "STATS";
 
-        for (auto &i : crmResTypeNameMap){
+        //test case list :  IPV4_ROUTE IPV6_ROUTE IPV4_NEXTHOP IPV6_NEXTHOP
+        //                  NEXTHOP_GROUP_MEMBER NEXTHOP_GROUP FDB_ENTRY
+        for (auto &i : crmResTypeNameMap)
+        {
             if(i.first == CrmResourceType::CRM_ACL_TABLE || i.first == CrmResourceType::CRM_ACL_GROUP
                || i.first == CrmResourceType::CRM_ACL_ENTRY || i.first == CrmResourceType::CRM_ACL_COUNTER)
-            continue;
-            gCrmOrch->m_resourcesMap.at(i.first).countersMap[keys].usedCounter = used_num;
+                continue;
+            gCrmOrch->m_resourcesMap.at(i.first).countersMap["STATS"].usedCounter = used_num;
             gCrmOrch->incCrmResUsedCounter(i.first);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).countersMap[keys].usedCounter,(used_num+1));
             gCrmOrch->decCrmResUsedCounter(i.first);
@@ -323,7 +289,7 @@ namespace CrmTest
     }
 
 
-    TEST_F(CrmTest, AclUsedCounter)
+    TEST_F(CrmOrchTest, AclUsedCounter)
     {
         CrmResourceType rnage[] = {CrmResourceType::CRM_ACL_TABLE,CrmResourceType::CRM_ACL_GROUP};
         int used_num = 0;
@@ -331,11 +297,13 @@ namespace CrmTest
         string str,str1;
 
         //test case list :  ACL_TABLE ACL_GROUP
-
-        for(auto &k :rnage ){
+        for(auto &k :rnage )
+        {
             used_num = k == CrmResourceType::CRM_ACL_TABLE ? 0 : 6;
-            for (int i = SAI_ACL_STAGE_INGRESS;i<= SAI_ACL_STAGE_EGRESS;i++){
-                for (int j= SAI_ACL_BIND_POINT_TYPE_PORT;j<=SAI_ACL_BIND_POINT_TYPE_SWITCH;j++){
+            for (int i = SAI_ACL_STAGE_INGRESS;i<= SAI_ACL_STAGE_EGRESS;i++)
+            {
+                for (int j= SAI_ACL_BIND_POINT_TYPE_PORT;j<=SAI_ACL_BIND_POINT_TYPE_SWITCH;j++)
+                {
                     int l = j == SAI_ACL_BIND_POINT_TYPE_SWITCH ? SAI_ACL_BIND_POINT_TYPE_PORT :j+1;
                     //table 1
                     str = gCrmOrch->getCrmAclKey((sai_acl_stage_t)i, (sai_acl_bind_point_type_t)j);
@@ -343,7 +311,8 @@ namespace CrmTest
                     gCrmOrch->m_resourcesMap.at(k).countersMap[str].id = table_oid;
                     gCrmOrch->incCrmAclUsedCounter(k, (sai_acl_stage_t)i, (sai_acl_bind_point_type_t)j);
                     ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap[str].usedCounter,(used_num+1));
-                    if(k == CrmResourceType::CRM_ACL_TABLE){
+                    if(k == CrmResourceType::CRM_ACL_TABLE)
+                    {
                          ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str) != gCrmOrch->m_resourcesMap.at(k).countersMap.end());
                     }
 
@@ -353,7 +322,8 @@ namespace CrmTest
                     gCrmOrch->m_resourcesMap.at(k).countersMap[str1].id = table_oid1;
                     gCrmOrch->incCrmAclUsedCounter(k, (sai_acl_stage_t)i, (sai_acl_bind_point_type_t)l);
                     ASSERT_EQ(gCrmOrch->m_resourcesMap.at(k).countersMap[str1].usedCounter,(used_num+1));
-                    if(k == CrmResourceType::CRM_ACL_TABLE){
+                    if(k == CrmResourceType::CRM_ACL_TABLE)
+                    {
                          ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str1) != gCrmOrch->m_resourcesMap.at(k).countersMap.end());
                     }
 
@@ -361,7 +331,8 @@ namespace CrmTest
                     gCrmOrch->decCrmAclUsedCounter(k, (sai_acl_stage_t)i, (sai_acl_bind_point_type_t)l, table_oid1);
                     gCrmOrch->decCrmAclUsedCounter(k, (sai_acl_stage_t)i, (sai_acl_bind_point_type_t)j, table_oid);
                     //check erase countersMap and not need to check usedCounter
-                    if(k == CrmResourceType::CRM_ACL_TABLE){
+                    if(k == CrmResourceType::CRM_ACL_TABLE)
+                    {
                         ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str1) == gCrmOrch->m_resourcesMap.at(k).countersMap.end());
                         ASSERT_TRUE(gCrmOrch->m_resourcesMap.at(k).countersMap.find(str) == gCrmOrch->m_resourcesMap.at(k).countersMap.end());
                     }else
@@ -383,15 +354,16 @@ namespace CrmTest
         }
     }
 
-    TEST_F(CrmTest, AclTableUsedCounter)
+    TEST_F(CrmOrchTest, AclTableUsedCounter)
     {
         sai_object_id_t tableId  = 10;
         CrmResourceType rnage[] = {CrmResourceType::CRM_ACL_ENTRY,CrmResourceType::CRM_ACL_COUNTER};
         int used_num = 15;
         string str = gCrmOrch->getCrmAclTableKey(tableId);
-        //test case list :  ACL_ENTRY ACL_COUNTER
 
-        for (auto &i : rnage){
+        //test case list :  ACL_ENTRY ACL_COUNTER
+        for (auto &i : rnage)
+        {
             gCrmOrch->m_resourcesMap.at(i).countersMap[str].usedCounter = used_num;
             gCrmOrch->incCrmAclTableUsedCounter(i, tableId);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i).countersMap[str].usedCounter,(used_num+1));
@@ -401,33 +373,50 @@ namespace CrmTest
         }
     }
 
-    TEST_F(CrmTest, Crm_Config_PollingInterval)
+    TEST_F(CrmOrchTest, Crm_Config_PollingInterval)
     {
         uint32_t interval = 20;
         auto consumer = std::unique_ptr<Consumer>(new Consumer(new swss::ConsumerStateTable(m_config_db.get(), std::string(CFG_CRM_TABLE_NAME), 1, 1), gCrmOrch, std::string(CFG_CRM_TABLE_NAME)));
 
         //check default
         ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, (5 * 60));
-
         //check PollingInterval
-        std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ "polling_interval", to_string(interval) }}} };
+        std::deque<KeyOpFieldsValuesTuple> setData =
+        { { "CRM",
+            "SET",
+            {
+                {   "polling_interval",
+                    to_string(interval)
+                }
+            }
+        } };
         consumer->addToSync(setData);
         gCrmOrch->doTask(*consumer);
         ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
     }
 
-    TEST_F(CrmTest, Crm_Config_thresholdType)
+    TEST_F(CrmOrchTest, Crm_Config_thresholdType)
     {
         sai_object_id_t tableId  = 10;
         auto consumer = std::unique_ptr<Consumer>(new Consumer(new swss::ConsumerStateTable(m_config_db.get(), std::string(CFG_CRM_TABLE_NAME), 1, 1), gCrmOrch, std::string(CFG_CRM_TABLE_NAME)));
 
-        for (auto &i : crmThreshTypeResMap){
+        for (auto &i : crmThreshTypeResMap)
+        {
             //check default
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).thresholdType,CrmThresholdType::CRM_PERCENTAGE);
 
-            for (auto &j : crmThreshTypeMap){
+            for (auto &j : crmThreshTypeMap)
+            {
                 //check threshold type
-                std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, j.first }}} };
+                std::deque<KeyOpFieldsValuesTuple> setData =
+                { { "CRM",
+                    "SET",
+                    {
+                        {   i.first,
+                            j.first
+                        }
+                    }
+                } };
                 consumer->addToSync(setData);
                 gCrmOrch->doTask(*consumer);
                 ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).thresholdType,j.second);
@@ -435,43 +424,61 @@ namespace CrmTest
         }
     }
 
-    TEST_F(CrmTest, Crm_Config_thresholdlow)
+    TEST_F(CrmOrchTest, Crm_Config_thresholdlow)
     {
         sai_object_id_t tableId  = 10;
         uint32_t lowThreshold = 60;
         auto consumer = std::unique_ptr<Consumer>(new Consumer(new swss::ConsumerStateTable(m_config_db.get(), std::string(CFG_CRM_TABLE_NAME), 1, 1), gCrmOrch, std::string(CFG_CRM_TABLE_NAME)));
 
-        for (const auto &i : crmThreshLowResMap){
+        for (const auto &i : crmThreshLowResMap)
+        {
             //check default
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).lowThreshold,70);
 
             //check low threshold
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(lowThreshold) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "SET",
+                {
+                    {   i.first,
+                        to_string(lowThreshold)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
             gCrmOrch->doTask(*consumer);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).lowThreshold,lowThreshold);
         }
     }
 
-    TEST_F(CrmTest, Crm_Config_thresholdhigh)
+    TEST_F(CrmOrchTest, Crm_Config_thresholdhigh)
     {
         sai_object_id_t tableId  = 10;
         uint32_t highThreshold = 90;
         auto consumer = std::unique_ptr<Consumer>(new Consumer(new swss::ConsumerStateTable(m_config_db.get(), std::string(CFG_CRM_TABLE_NAME), 1, 1), gCrmOrch, std::string(CFG_CRM_TABLE_NAME)));
 
-        for (const auto &i : crmThreshHighResMap){
+        for (const auto &i : crmThreshHighResMap)
+        {
             //check default
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).highThreshold,85);
 
             //check low threshold
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ i.first, to_string(highThreshold) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "SET",
+                {
+                    {   i.first,
+                        to_string(highThreshold)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
             gCrmOrch->doTask(*consumer);
             ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.second).highThreshold,highThreshold);
         }
     }
 
-    TEST_F(CrmTest, Crm_Config_UnexpectedCase)
+    TEST_F(CrmOrchTest, Crm_Config_UnexpectedCase)
     {
         uint32_t interval = 20, interval1 = 30;
         auto consumer = std::unique_ptr<Consumer>(new Consumer(new swss::ConsumerStateTable(m_config_db.get(), std::string(CFG_CRM_TABLE_NAME), 1, 1), gCrmOrch, std::string(CFG_CRM_TABLE_NAME)));
@@ -481,23 +488,55 @@ namespace CrmTest
         ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, (5 * 60));
         {
             //check error table name
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ "polling_interval", to_string(interval) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "SET",
+                {
+                    {   "polling_interval",
+                        to_string(interval)
+                    }
+                }
+            } };
             consumer_test->addToSync(setData);
             gCrmOrch->doTask(*consumer_test);
             ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval );
         }
         {
             //check error ATTR
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "DEL", {{ "polling_interval", to_string(interval1) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "DEL",
+                {
+                    {   "polling_interval",
+                        to_string(interval1)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
-            std::deque<KeyOpFieldsValuesTuple> setData1 = { {"CRM", "SET", {{ "ipv4_route_high_threshold", to_string(100) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData1 =
+            { { "CRM",
+                "SET",
+                {
+                    {   "ipv4_route_high_threshold",
+                        to_string(100)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
             gCrmOrch->doTask(*consumer);
             ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
         }
         {
             // COMMAND unexpected
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "ADD", {{ "polling_interval", to_string(interval1) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "ADD",
+                {
+                    {   "polling_interval",
+                        to_string(interval1)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
             gCrmOrch->doTask(*consumer);
             ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
@@ -505,15 +544,22 @@ namespace CrmTest
 
         {
             // field unexpected
-            std::deque<KeyOpFieldsValuesTuple> setData = { {"CRM", "SET", {{ "polling_interval1", to_string(interval1) }}} };
+            std::deque<KeyOpFieldsValuesTuple> setData =
+            { { "CRM",
+                "SET",
+                {
+                    {   "polling_interval1",
+                        to_string(interval1)
+                    }
+                }
+            } };
             consumer->addToSync(setData);
             gCrmOrch->doTask(*consumer);
             ASSERT_EQ(gCrmOrch->m_timer->m_interval.it_interval.tv_sec, interval);
         }
     }
 
-    
-    TEST_F(CrmTest, CRM_getUsedCounters)
+    TEST_F(CrmOrchTest, CRM_getUsedCounters)
     {
         sai_attribute_t attr;
         sai_status_t    status;
@@ -537,37 +583,47 @@ namespace CrmTest
                 {
                     int used_num = 42;
                     vector<FieldValueTuple> fvTuples;
-                    
+
                     //check COUNTERS_DB attr sai
                     gCrmOrch->m_resourcesMap.at(res.first).countersMap["STATS"].usedCounter = used_num;
                     gCrmOrch->doTask(*timer);
                     gCrmOrch->m_countersCrmTable->get("STATS", fvTuples);
-                    for (const auto &tbl : crmUsedCntsTableMap){
-                        if(tbl.second != res.first) continue;
-                        for (const auto& fv : fvTuples){
-                            if(tbl.first != fvField(fv)) continue;
+                    for (const auto &tbl : crmUsedCntsTableMap)
+                    {
+                        if(tbl.second != res.first)
+                            continue;
+                        for (const auto& fv : fvTuples)
+                        {
+                            if(tbl.first != fvField(fv))
+                                continue;
                             ASSERT_EQ(fvValue(fv),to_string(used_num));
                         }
-                    }      
+                    }
                     break;
                 }
-        
+
                 case CrmResourceType::CRM_ACL_TABLE:
                 case CrmResourceType::CRM_ACL_GROUP:
                 {
                     int used_num = 42;
                     vector<FieldValueTuple> fvTuples;
-                    
+
                     //check COUNTERS_DB attr sai
-                    for (int i = SAI_ACL_STAGE_INGRESS;i<=SAI_ACL_STAGE_EGRESS;i++){
-                        for (int j= SAI_ACL_BIND_POINT_TYPE_PORT;j<=SAI_ACL_BIND_POINT_TYPE_SWITCH;j++){
+                    for (int i = SAI_ACL_STAGE_INGRESS;i<=SAI_ACL_STAGE_EGRESS;i++)
+                    {
+                        for (int j= SAI_ACL_BIND_POINT_TYPE_PORT;j<=SAI_ACL_BIND_POINT_TYPE_SWITCH;j++)
+                        {
                             gCrmOrch->m_resourcesMap.at(res.first).countersMap[gCrmOrch->getCrmAclKey((sai_acl_stage_t)i, (sai_acl_bind_point_type_t)j)].usedCounter = used_num;
                             gCrmOrch->doTask(*timer);
                             gCrmOrch->m_countersCrmTable->get(gCrmOrch->getCrmAclKey((sai_acl_stage_t)i, (sai_acl_bind_point_type_t)j), fvTuples);
-                            for (const auto &tbl : crmUsedCntsTableMap){
-                                if(tbl.second != res.first) continue;
-                                for (const auto& fv : fvTuples){
-                                    if(tbl.first != fvField(fv)) continue;
+                            for (const auto &tbl : crmUsedCntsTableMap)
+                            {
+                                if(tbl.second != res.first)
+                                    continue;
+                                for (const auto& fv : fvTuples)
+                                {
+                                    if(tbl.first != fvField(fv))
+                                        continue;
                                     ASSERT_EQ(fvValue(fv),to_string(used_num));
                                 }
                             }
@@ -587,10 +643,14 @@ namespace CrmTest
                     gCrmOrch->m_resourcesMap.at(res.first).countersMap[gCrmOrch->getCrmAclTableKey(tableId)].usedCounter = used_num;
                     gCrmOrch->doTask(*timer);
                     gCrmOrch->m_countersCrmTable->get(gCrmOrch->getCrmAclTableKey(tableId), fvTuples);
-                    for (const auto &tbl : crmUsedCntsTableMap){
-                        if(tbl.second != res.first) continue;
-                        for (const auto& fv : fvTuples){
-                            if(tbl.first != fvField(fv)) continue;
+                    for (const auto &tbl : crmUsedCntsTableMap)
+                    {
+                        if(tbl.second != res.first)
+                            continue;
+                        for (const auto& fv : fvTuples)
+                        {
+                            if(tbl.first != fvField(fv))
+                                continue;
                             ASSERT_EQ(fvValue(fv),to_string(used_num));
                         }
                     }
@@ -599,10 +659,9 @@ namespace CrmTest
             }
         }
     }
-    
-    TEST_F(CrmTest, CRM_getAvailableCounters)
+
+    TEST_F(CrmOrchTest, CRM_getAvailableCounters)
     {
-        //SWSS_LOG_ENTER();
         sai_attribute_t attr,attr1;
         sai_status_t    status;
         vector<sai_attribute_t> table_attrs;
@@ -635,10 +694,14 @@ namespace CrmTest
                     ASSERT_EQ(gCrmOrch->m_resourcesMap.at(res.first).countersMap["STATS"].availableCounter,avail_num);
                      //check COUNTERS_DB attr sai
                     gCrmOrch->m_countersCrmTable->get("STATS", fvTuples);
-                    for (const auto &tbl : crmAvailCntsTableMap){
-                        if(tbl.second != res.first) continue;
-                        for (const auto& fv : fvTuples){
-                            if(tbl.first != fvField(fv)) continue;
+                    for (const auto &tbl : crmAvailCntsTableMap)
+                    {
+                        if(tbl.second != res.first)
+                            continue;
+                        for (const auto& fv : fvTuples)
+                        {
+                            if(tbl.first != fvField(fv))
+                                continue;
                             ASSERT_EQ(fvValue(fv),to_string(avail_num));
                         }
                     }
@@ -671,28 +734,33 @@ namespace CrmTest
                     //check COUNTERS_DB attr sai
                     gCrmOrch->m_countersCrmTable->get(gCrmOrch->getCrmAclKey(SAI_ACL_STAGE_INGRESS,SAI_ACL_BIND_POINT_TYPE_LAG), fvTuples);
                     gCrmOrch->m_countersCrmTable->get(gCrmOrch->getCrmAclKey(SAI_ACL_STAGE_EGRESS,SAI_ACL_BIND_POINT_TYPE_VLAN), fvTuples1);
-                    for (const auto &tbl : crmAvailCntsTableMap){
-                        if(tbl.second != res.first) continue;
+                    for (const auto &tbl : crmAvailCntsTableMap)
+                    {
+                        if(tbl.second != res.first)
+                            continue;
                         for (const auto& fv : fvTuples){
-                            if(tbl.first != fvField(fv)) continue;
+                            if(tbl.first != fvField(fv))
+                                continue;
                             ASSERT_EQ(fvValue(fv),to_string(avail_num));
                         }
-                        for (const auto& fv : fvTuples1){
-                            if(tbl.first != fvField(fv)) continue;
+                        for (const auto& fv : fvTuples1)
+                        {
+                            if(tbl.first != fvField(fv))
+                                continue;
                             ASSERT_EQ(fvValue(fv),to_string(avail_num1));
                         }
                     }
 
                     //if the count is over CRM_ACL_RESOURCE_COUNT, it also can parser success
                     {
-                        int count = 300;
+                        int count = 300, avail_num = 1000;
                         vector<sai_acl_resource_t> resources(count);
                         vector<FieldValueTuple> fvTuples;
-                        int avail_num = 1000;
 
                         attr.value.aclresource.count = count;
                         attr.value.aclresource.list = resources.data();
-                        for(int cnt=0;cnt<count;cnt++ ){
+                        for(int cnt=0; cnt<count; cnt++)
+                        {
                             attr.value.aclresource.list[cnt].stage = SAI_ACL_STAGE_INGRESS;
                             attr.value.aclresource.list[cnt].bind_point = SAI_ACL_BIND_POINT_TYPE_LAG;
                             attr.value.aclresource.list[cnt].avail_num = avail_num - (cnt+1);
@@ -706,9 +774,12 @@ namespace CrmTest
                         //check COUNTERS_DB attr sai
                         gCrmOrch->m_countersCrmTable->get(gCrmOrch->getCrmAclKey(SAI_ACL_STAGE_INGRESS,SAI_ACL_BIND_POINT_TYPE_LAG), fvTuples);
                         for (const auto &tbl : crmAvailCntsTableMap){
-                            if(tbl.second != res.first) continue;
-                            for (const auto& fv : fvTuples){
-                                if(tbl.first != fvField(fv)) continue;
+                            if(tbl.second != res.first)
+                                continue;
+                            for (const auto& fv : fvTuples)
+                            {
+                                if(tbl.first != fvField(fv))
+                                    continue;
                                 ASSERT_EQ(fvValue(fv),to_string(avail_num-count));
                             }
                         }
@@ -757,13 +828,15 @@ namespace CrmTest
         }
     }
 
-    TEST_F(CrmTest, CRM_checkCrmThresholds)
+    TEST_F(CrmOrchTest, CRM_checkCrmThresholds)
     {
     
         SelectableTimer *timer = new SelectableTimer(timespec { .tv_sec = 300, .tv_nsec = 0 });
         int highThreshold = 90, lowThreshold = 60;
         int loop_times = 5;
-        for (auto &i : gCrmOrch->m_resourcesMap){
+
+        for (auto &i : gCrmOrch->m_resourcesMap)
+        {
             gCrmOrch->m_resourcesMap.at(i.first).highThreshold = highThreshold;
             gCrmOrch->m_resourcesMap.at(i.first).lowThreshold =  lowThreshold;
             switch (i.first)
@@ -787,14 +860,16 @@ namespace CrmTest
                     else
                         str = "STATS";
 
-                     for(auto &j : crmThreshTypeMap){
+                     for(auto &j : crmThreshTypeMap)
+                     {
                         gCrmOrch->m_resourcesMap.at(i.first).thresholdType = j.second;
                         switch(j.second)
                         {
                             case CrmThresholdType::CRM_PERCENTAGE:
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 5;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 95;
-                                for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                for(int loop = 0;loop<loop_times;loop ++)
+                                    gCrmOrch->doTask(*timer);
                                 ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 30;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 70;
@@ -809,7 +884,8 @@ namespace CrmTest
                              case CrmThresholdType::CRM_USED:
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 0;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 100;
-                                for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                for(int loop = 0;loop<loop_times;loop ++)
+                                    gCrmOrch->doTask(*timer);
                                 ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 0;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 70;
@@ -821,10 +897,11 @@ namespace CrmTest
                                 ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,0);
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap.erase(str);
                                 break;
-                             case CrmThresholdType::CRM_FREE:  
+                             case CrmThresholdType::CRM_FREE:
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 100;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 0;
-                                for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                for(int loop = 0;loop<loop_times;loop ++)
+                                    gCrmOrch->doTask(*timer);
                                 ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 70;
                                 gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 0;
@@ -845,10 +922,13 @@ namespace CrmTest
                 case CrmResourceType::CRM_ACL_GROUP:
                 {
                     string str;
-                    for(auto &j : crmThreshTypeMap){
+                    for(auto &j : crmThreshTypeMap)
+                    {
                         gCrmOrch->m_resourcesMap.at(i.first).thresholdType = j.second;
-                        for (int m = SAI_ACL_STAGE_INGRESS;m<= SAI_ACL_STAGE_EGRESS;m++){
-                            for (int l= SAI_ACL_BIND_POINT_TYPE_PORT;l<=SAI_ACL_BIND_POINT_TYPE_SWITCH;l++){
+                        for (int m = SAI_ACL_STAGE_INGRESS;m<= SAI_ACL_STAGE_EGRESS;m++)
+                        {
+                            for (int l= SAI_ACL_BIND_POINT_TYPE_PORT;l<=SAI_ACL_BIND_POINT_TYPE_SWITCH;l++)
+                            {
                                 str = gCrmOrch->getCrmAclKey((sai_acl_stage_t)m, (sai_acl_bind_point_type_t)l);
                                 switch(j.second)
                                 {
@@ -856,7 +936,8 @@ namespace CrmTest
                                     {
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 5;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 95;
-                                        for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                        for(int loop = 0;loop<loop_times;loop ++)
+                                            gCrmOrch->doTask(*timer);
                                         ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 30;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 70;
@@ -873,7 +954,8 @@ namespace CrmTest
                                     {
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 100;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 100;
-                                        for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                        for(int loop = 0;loop<loop_times;loop ++)
+                                            gCrmOrch->doTask(*timer);
                                         ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 100;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 70;
@@ -890,7 +972,8 @@ namespace CrmTest
                                     {
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 100;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 0;
-                                        for(int loop = 0;loop<loop_times;loop ++) gCrmOrch->doTask(*timer);
+                                        for(int loop = 0;loop<loop_times;loop ++)
+                                            gCrmOrch->doTask(*timer);
                                         ASSERT_EQ(gCrmOrch->m_resourcesMap.at(i.first).exceededLogCounter,loop_times);
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].availableCounter = 70;
                                         gCrmOrch->m_resourcesMap.at(i.first).countersMap[str].usedCounter = 0;
