@@ -10,6 +10,8 @@
 #include "saiattributelist.h"
 #include "saihelper.h"
 #include "swssnet.h"
+#include "tokenize.h"
+#include "subscriberstatetable.h"
 
 using namespace std;
 using namespace swss;
@@ -37,20 +39,19 @@ extern bool gLogRotate;
 extern ofstream gRecordOfs;
 extern string gRecordFile;
 
-extern sai_switch_api_t* sai_switch_api;
-extern sai_qos_map_api_t* sai_qos_map_api;
-extern sai_wred_api_t* sai_wred_api;
-extern sai_port_api_t* sai_port_api;
-extern sai_vlan_api_t*  sai_vlan_api;
-extern sai_bridge_api_t* sai_bridge_api;
-extern sai_virtual_router_api_t* sai_virtual_router_api;
+extern sai_switch_api_t*            sai_switch_api;
+extern sai_qos_map_api_t*           sai_qos_map_api;
+extern sai_wred_api_t*              sai_wred_api;
+extern sai_port_api_t*              sai_port_api;
+extern sai_vlan_api_t*              sai_vlan_api;
+extern sai_bridge_api_t*            sai_bridge_api;
+extern sai_virtual_router_api_t*    sai_virtual_router_api;
+extern sai_router_interface_api_t*  sai_router_intfs_api;
+extern sai_tunnel_api_t*            sai_tunnel_api;
+extern sai_next_hop_api_t*          sai_next_hop_api;
 
 extern PortsOrch*       gPortsOrch;
-extern sai_tunnel_api_t *sai_tunnel_api;
-extern sai_next_hop_api_t *sai_next_hop_api;
-extern sai_router_interface_api_t *sai_router_intfs_api;
 extern Directory<Orch*> gDirectory;
-extern sai_object_id_t  gUnderlayIfId;
 
 const map<MAP_T, uint32_t> vxlanTunnelMap =
 {
@@ -143,30 +144,110 @@ namespace VxlanOrchCppTest
 {
     using namespace testing;
 
-    std::shared_ptr<swss::DBConnector> m_configDb;
-    std::shared_ptr<swss::DBConnector> m_applDb;
-    std::shared_ptr<swss::DBConnector> m_stateDb;
+    shared_ptr<DBConnector> m_configDb;
+    shared_ptr<DBConnector> m_applDb;
+    shared_ptr<DBConnector> m_stateDb;
 
-    // In order to use addToSync() in Consumer which is protected
-    class ConsumerExtend : public Consumer
+    static map<string, string> gProfileMap;
+    static map<string, string>::iterator gProfileIter;
+
+    static const char* profile_get_value(
+        sai_switch_profile_id_t profile_id,
+        const char* variable)
     {
-    public:
-        ConsumerExtend(ConsumerTableBase *select, Orch *orch, const string &name) : Consumer(select, orch, name)
-        {
+        map<string, string>::const_iterator it = gProfileMap.find(variable);
+        if (it == gProfileMap.end()) {
+            return NULL;
         }
 
-        size_t addToSync(std::deque<KeyOpFieldsValuesTuple> &entries)
-        {
-            Consumer::addToSync(entries);
+        return it->second.c_str();
+    }
+
+    static int profile_get_next_value(
+        sai_switch_profile_id_t profile_id,
+        const char** variable,
+        const char** value)
+    {
+        if (value == NULL) {
+            gProfileIter = gProfileMap.begin();
             return 0;
         }
-    };
+
+        if (variable == NULL) {
+            return -1;
+        }
+
+        if (gProfileIter == gProfileMap.end()) {
+            return -1;
+        }
+
+        *variable = gProfileIter->first.c_str();
+        *value = gProfileIter->second.c_str();
+
+        gProfileIter++;
+
+        return 0;
+    }
+
+size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>& entries)
+{
+    /* Nothing popped */
+    if (entries.empty())
+    {
+        return 0;
+    }
+
+    for (auto& entry : entries)
+    {
+        string key = kfvKey(entry);
+        string op = kfvOp(entry);
+
+        /* If a new task comes or if a DEL task comes, we directly put it into getConsumerTable().m_toSync map */
+        if (consumer->m_toSync.find(key) == consumer->m_toSync.end() || op == DEL_COMMAND)
+        {
+            consumer->m_toSync[key] = entry;
+        }
+        /* If an old task is still there, we combine the old task with new task */
+        else
+        {
+            KeyOpFieldsValuesTuple existing_data = consumer->m_toSync[key];
+
+            auto new_values = kfvFieldsValues(entry);
+            auto existing_values = kfvFieldsValues(existing_data);
+
+            for (auto it : new_values)
+            {
+                string field = fvField(it);
+                string value = fvValue(it);
+
+                auto iu = existing_values.begin();
+                while (iu != existing_values.end())
+                {
+                    string ofield = fvField(*iu);
+                    if (field == ofield)
+                        iu = existing_values.erase(iu);
+                    else
+                        iu++;
+                }
+                existing_values.push_back(FieldValueTuple(field, value));
+            }
+            consumer->m_toSync[key] = KeyOpFieldsValuesTuple(key, op, existing_values);
+        }
+    }
+    return entries.size();
+}
+
 
     class OrchagentStub
     {
     public:
-        sai_status_t do_init()
+        sai_status_t saiInit()
         {
+            // Init switch and create dependencies
+
+            gProfileMap.emplace("SAI_VS_SWITCH_TYPE", "SAI_VS_SWITCH_TYPE_BCM56850");
+            gProfileMap.emplace("KV_DEVICE_MAC_ADDRESS", "20:03:04:05:06:00");
+
             static sai_service_method_table_t test_services = {
                 profile_get_value,
                 profile_get_next_value
@@ -222,7 +303,7 @@ namespace VxlanOrchCppTest
             return status;
         }
 
-        sai_status_t do_uninit()
+        sai_status_t saiUnInit()
         {
             auto status = sai_switch_api->remove_switch(gSwitchId);
             gSwitchId = 0;
@@ -239,17 +320,17 @@ namespace VxlanOrchCppTest
             return status;
         }
 
-        sai_status_t create_virtual_router_object(sai_object_id_t& obj_id)
+        sai_status_t createVirtualRouter(sai_object_id_t& obj_id)
         {
-            std::random_device rd;
-            std::default_random_engine gen = std::default_random_engine(rd());
-            std::uniform_int_distribution<int> dis(1,9);
+            random_device rd;
+            default_random_engine gen = default_random_engine(rd());
+            uniform_int_distribution<int> dis(1,9);
             sai_attribute_t attr;
 
             vector<sai_attribute_t> attrs;
-            auto mac = MacAddress("02:04:06:08:0a:0" + std::to_string(dis(gen)));
+            auto mac = MacAddress("02:04:06:08:0a:0" + to_string(dis(gen)));
             attr.id = SAI_VIRTUAL_ROUTER_ATTR_SRC_MAC_ADDRESS;
-            memcpy(attr.value.mac, mac.getMac(), sizeof(sai_mac_t));
+            memcpy(attr.value.mac, mac.getMac(), ETHER_ADDR_LEN);
             attrs.push_back(attr);
 
             return sai_virtual_router_api->create_virtual_router(&obj_id,
@@ -259,41 +340,41 @@ namespace VxlanOrchCppTest
 
         }
 
-        void create_vlan_in_portorch(uint16_t vlan_id)
+        void createVlanInPortorch(uint16_t vlan_id)
         {
-            ConsumerExtend *consumer_port;
-            string vlan_key = "Vlan" + std::to_string(vlan_id);
+            //ConsumerExtend *consumer_port;
+            string vlan_alias = "Vlan" + to_string(vlan_id);
             port_table_init();
-
-            consumer_port = new ConsumerExtend(new swss::ConsumerStateTable(m_applDb.get(), std::string(APP_VLAN_TABLE_NAME), 1, 1), gPortsOrch, APP_VLAN_TABLE_NAME);
-            auto setData_port = std::deque<KeyOpFieldsValuesTuple>(
-                { { vlan_key,
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VLAN_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_VLAN_TABLE_NAME));
+            auto setData = deque<KeyOpFieldsValuesTuple>(
+                { { vlan_alias,
                     SET_COMMAND,
                     {
-                      {"vlanid", std::to_string(vlan_id)},
+                      {"vlanid", to_string(vlan_id)},
                       {"mtu", "9100"}
                     }
                 } });
-            consumer_port->addToSync(setData_port);
-            ((Orch *) gPortsOrch)->doTask(*consumer_port);
+            consumerAddToSync(consumer.get(), setData);
+            ((Orch *) gPortsOrch)->doTask(*consumer.get());
+            //consumer_port->addToSync(setData_port);
+            //((Orch *) gPortsOrch)->doTask(*consumer_port);
         }
 
-        void create_vrf_in_vrforch(string vrf_name)
+        void createVrfInVrforch(string vrf_name)
         {
-            std::random_device rd;
-            std::default_random_engine gen = std::default_random_engine(rd());
-            std::uniform_int_distribution<int> dis(1,9);
-            sai_attribute_t attr;
-            vector<sai_attribute_t> attrs;
-            auto mac_string = "02:04:06:08:0a:0" + std::to_string(dis(gen));
+            random_device rd;
+            default_random_engine gen = default_random_engine(rd());
+            uniform_int_distribution<int> dis(1,9);
+            auto mac_string = "02:04:06:08:0a:0" + to_string(dis(gen));
             auto vrf_orch = gDirectory.get<VRFOrch*>();
             if(!vrf_orch) {
                 vrf_orch = new VRFOrch(m_applDb.get(), APP_VRF_TABLE_NAME);
                 gDirectory.set(vrf_orch);
             }
-            ConsumerExtend *consumer_vrf = new ConsumerExtend(new swss::ConsumerStateTable(m_applDb.get(), std::string(APP_VRF_TABLE_NAME), 1, 1), vrf_orch, APP_VRF_TABLE_NAME);
-
-            auto setData_vrf = std::deque<KeyOpFieldsValuesTuple>(
+            //ConsumerExtend *consumer_vrf = new ConsumerExtend(new ConsumerStateTable(m_applDb.get(), string(APP_VRF_TABLE_NAME), 1, 1), vrf_orch, APP_VRF_TABLE_NAME);
+            //auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VRF_TABLE_NAME, 1, 1), vrf_orch, APP_VRF_TABLE_NAME));
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VRF_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vrf_orch, APP_VRF_TABLE_NAME));   
+            auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { vrf_name,
                     SET_COMMAND,
                     {
@@ -305,11 +386,13 @@ namespace VxlanOrchCppTest
                       {"l3_mc_action", "drop"}
                     }
                 } });
-            consumer_vrf->addToSync(setData_vrf);
-            ((Orch *) vrf_orch)->doTask(*consumer_vrf);
+            consumerAddToSync(consumer.get(), setData);
+            ((Orch *) vrf_orch)->doTask(*consumer.get());
+            //consumer_vrf->addToSync(setData_vrf);
+            //((Orch *) vrf_orch)->doTask(*consumer_vrf);
         }
 
-        void create_tunnel_in_tunnelorch(string tunnel_name)
+        void createTunnelInTunnelorch(string tunnel_name)
         {
             auto vxlan_tunnel_orch = gDirectory.get<VxlanTunnelOrch*>();
             if (!vxlan_tunnel_orch)
@@ -317,9 +400,9 @@ namespace VxlanOrchCppTest
                 vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
                 gDirectory.set(vxlan_tunnel_orch);
             }
-
-            ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new swss::ConsumerStateTable(m_configDb.get(), std::string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
-            auto setData = std::deque<KeyOpFieldsValuesTuple>(
+            
+            //ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
+            auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_name,
                         SET_COMMAND,
                         {
@@ -327,26 +410,26 @@ namespace VxlanOrchCppTest
                           {"dst_ip", "101.101.101.102"}
                         }
                     } });
-
-            vxlan_tunnel_consumer->addToSync(setData);
-            ((Orch *) vxlan_tunnel_orch)->doTask(*vxlan_tunnel_consumer);
+            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME)); 
+            
+            consumerAddToSync(consumer.get(), setData);
+            
+            //vxlan_tunnel_consumer->addToSync(setData);
+            ((Orch *) vxlan_tunnel_orch)->doTask(*consumer.get());
             VxlanTunnel tunnel1 = VxlanTunnel(tunnel_name, IpAddress("91.91.91.92"), IpAddress("101.101.101.102"));
             ASSERT_TRUE(tunnel1.createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
-            delete vxlan_tunnel_consumer;
         }
 
     private:
         void port_table_init(void)
         {
-            auto consumerStateTable = new ConsumerStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, 1, 1); // free by consumerStateTable
-            auto consumerExt = new ConsumerExtend(consumerStateTable, gPortsOrch, APP_PORT_TABLE_NAME);
-            auto setData = std::deque<KeyOpFieldsValuesTuple>(
-                { { "PortInitDone",
-                    EMPTY_PREFIX,
-                    { { "", "" } } } });
-
-            consumerExt->addToSync(setData);
-            static_cast<Orch*>(gPortsOrch)->doTask(*consumerExt);
+            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
+            
+            consumerAddToSync(consumer.get(), { { "PortInitDone", EMPTY_PREFIX, {} } });
+            ((Orch *) gPortsOrch)->doTask(*consumer.get());
+            ASSERT_TRUE(gPortsOrch->isInitDone());
         }
 
     };
@@ -367,15 +450,15 @@ namespace VxlanOrchCppTest
 
         void SetUp()
         {
-            ASSERT_TRUE(orchgent_stub.do_init() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
         }
 
         void TearDown()
         {
-            ASSERT_TRUE(orchgent_stub.do_uninit() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
 
-        void validate_tunnel(const VxlanTunnel &tunnel)
+        void validateTunnelInSai(const VxlanTunnel &tunnel)
         {
             sai_attribute_t attr;
             auto encap_obj_id = tunnel.getEncapMapId();
@@ -474,10 +557,9 @@ namespace VxlanOrchCppTest
         {
             for (auto const& ip_pattern : tunnel_ip_pattern)
             {
-                sai_attribute_t attr;
                 VxlanTunnel tunnel = VxlanTunnel("tunnel", ip_pattern.first, ip_pattern.second);
                 ASSERT_TRUE(tunnel.createTunnel(x.first, x.second));
-                validate_tunnel(tunnel);
+                validateTunnelInSai(tunnel);
             }
         }
     }
@@ -496,7 +578,6 @@ namespace VxlanOrchCppTest
         tunnel_obj->createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID);
 
         tunnel_obj->insertMapperEntry(SAI_NULL_OBJECT_ID, SAI_NULL_OBJECT_ID, vni);
-        auto mapper = tunnel_obj->getMapperEntry(vni);
         tunnel_obj->updateNextHop(src_ip, macAddress, vni, nh_id);
         tunnel_obj->getNextHop(src_ip, macAddress, vni);
         auto key = nh_key_t(src_ip, macAddress, vni);
@@ -512,7 +593,7 @@ namespace VxlanOrchCppTest
         try{
             tunnel_obj->removeNextHop(src_ip, macAddress, vni);
         }
-        catch(const std::runtime_error& error) {
+        catch(const runtime_error& error) {
             ASSERT_TRUE(true);
         }
     }
@@ -520,14 +601,14 @@ namespace VxlanOrchCppTest
 	class VxlanTunnelOrchTest : public Test
     {
     public:
-        ConsumerExtend *consumer;
+        //ConsumerExtend *consumer;
         VxlanTunnelOrch *vxlan_tunnel_orch;
 
         VxlanTunnelOrchTest()
         {
-            m_configDb = std::make_shared<swss::DBConnector>(CONFIG_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_applDb = std::make_shared<swss::DBConnector>(APPL_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_stateDb = std::make_shared<swss::DBConnector>(STATE_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_configDb = make_shared<DBConnector>(CONFIG_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_applDb = make_shared<DBConnector>(APPL_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_stateDb = make_shared<DBConnector>(STATE_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
         }
 
         ~VxlanTunnelOrchTest()
@@ -536,17 +617,34 @@ namespace VxlanOrchCppTest
 
         void SetUp()
         {
-            ASSERT_TRUE(orchgent_stub.do_init() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
             vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
-            consumer = new ConsumerExtend(new swss::ConsumerStateTable(m_configDb.get(), std::string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
+            //consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
         }
 
         void TearDown()
         {
-            delete consumer;
-            delete vxlan_tunnel_orch;
-            ASSERT_TRUE(orchgent_stub.do_uninit() == SAI_STATUS_SUCCESS);
+            //delete consumer;
+            //delete vxlan_tunnel_orch;
+            ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
+
+        void doVxlanTunnelOrchTask(const deque<KeyOpFieldsValuesTuple>& entries, const string command = SET_COMMAND)
+        {
+            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME)); 
+            
+            deque<KeyOpFieldsValuesTuple> tmp(entries);
+
+            for (auto it = tmp.begin(); it != tmp.end(); ++it)
+            {
+                get<1>(*it) = command;
+            }
+
+            consumerAddToSync(consumer.get(), tmp);
+            ((Orch *) vxlan_tunnel_orch)->doTask(*consumer.get());
+        }
+
     };
 
     TEST_F(VxlanTunnelOrchTest, CreateNextHopWhenTunnelNonExist)
@@ -558,7 +656,7 @@ namespace VxlanOrchCppTest
         auto exist_tunnel_obj = VxlanTunnel(exist_tunnel_name, IpAddress("1.1.1.1"), IpAddress("2.2.2.2"));
         ASSERT_TRUE(exist_tunnel_obj.createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
 
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { exist_tunnel_name,
                     SET_COMMAND,
                     {
@@ -566,8 +664,7 @@ namespace VxlanOrchCppTest
                       {"dst_ip", "101.101.101.102"}
                     }
                 } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_tunnel_orch)->doTask(*consumer);
+        doVxlanTunnelOrchTask(setData);
 
         endp.ip = IpAddress("10.10.10.10");
         endp.mac = MacAddress("52:54:00:25:12:E9");
@@ -575,7 +672,9 @@ namespace VxlanOrchCppTest
         nh_id = vxlan_tunnel_orch->createNextHopTunnel(non_exist_tunnel_name, endp.ip, endp.mac, endp.vni);
 
         /* Validate in local memory */
-        ASSERT_EQ (nh_id,SAI_NULL_OBJECT_ID);
+        ASSERT_EQ (nh_id, SAI_NULL_OBJECT_ID);
+
+        doVxlanTunnelOrchTask(setData, DEL_COMMAND);
     }
 
     TEST_F(VxlanTunnelOrchTest, CreateNextHopWhenTunnelExist)
@@ -583,7 +682,7 @@ namespace VxlanOrchCppTest
         sai_object_id_t nh_id = SAI_NULL_OBJECT_ID;
         tunnelEndpoint endp;
         string exist_tunnel_name = "tunnel1";
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { exist_tunnel_name,
                     SET_COMMAND,
                     {
@@ -591,10 +690,9 @@ namespace VxlanOrchCppTest
                       {"dst_ip", "101.101.101.102"}
                     }
                 } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_tunnel_orch)->doTask(*consumer);
+        doVxlanTunnelOrchTask(setData);
         auto exist_tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(exist_tunnel_name);
-        ASSERT_FALSE(exist_tunnel_obj->isActive());
+        ASSERT_TRUE(!exist_tunnel_obj->isActive());
         ASSERT_TRUE(exist_tunnel_obj->createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
         ASSERT_TRUE(exist_tunnel_obj->isActive());
 
@@ -611,9 +709,9 @@ namespace VxlanOrchCppTest
         /* Validate in SAI */
         auto tunnel_id = exist_tunnel_obj->getTunnelId();
         sai_ip_address_t host_ip;
-        swss::copy(host_ip, endp.ip);
+        copy(host_ip, endp.ip);
         sai_attribute_t attr;
-        std::vector<sai_attr_id_t> validated_attr_ids = {SAI_NEXT_HOP_ATTR_TYPE,
+        vector<sai_attr_id_t> validated_attr_ids = {SAI_NEXT_HOP_ATTR_TYPE,
                                         SAI_NEXT_HOP_ATTR_IP,
                                         SAI_NEXT_HOP_ATTR_TUNNEL_ID};
 
@@ -663,8 +761,9 @@ namespace VxlanOrchCppTest
         for (const sai_attr_id_t& attr_id : validated_attr_ids)
         {
             attr.id = attr_id;
-            ASSERT_FALSE(SAI_STATUS_SUCCESS == sai_next_hop_api->get_next_hop_attribute(nh_id, 1, &attr));
+            ASSERT_TRUE(SAI_STATUS_SUCCESS != sai_next_hop_api->get_next_hop_attribute(nh_id, 1, &attr));
         }
+        doVxlanTunnelOrchTask(setData, DEL_COMMAND);
     }
 
     TEST_F(VxlanTunnelOrchTest, createVxlanTunnelMapExist)
@@ -672,7 +771,7 @@ namespace VxlanOrchCppTest
         sai_object_id_t nh_id = SAI_NULL_OBJECT_ID;
         string exist_tunnel_name = "tunnel1";
         uint32_t vni = 10000;
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { exist_tunnel_name,
                     SET_COMMAND,
                     {
@@ -680,16 +779,15 @@ namespace VxlanOrchCppTest
                       {"dst_ip", "101.101.101.102"}
                     }
                 } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_tunnel_orch)->doTask(*consumer);
+        doVxlanTunnelOrchTask(setData);
         auto exist_tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(exist_tunnel_name);
-        ASSERT_FALSE(exist_tunnel_obj->isActive());
+        ASSERT_TRUE(!exist_tunnel_obj->isActive());
         ASSERT_TRUE(exist_tunnel_obj->createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
         ASSERT_TRUE(exist_tunnel_obj->isActive());
 
         sai_object_id_t encapId, decapId;
-        ASSERT_EQ(SAI_STATUS_SUCCESS, orchgent_stub.create_virtual_router_object(encapId));
-        ASSERT_EQ(SAI_STATUS_SUCCESS, orchgent_stub.create_virtual_router_object(decapId));
+        ASSERT_EQ(SAI_STATUS_SUCCESS, orchgent_stub.createVirtualRouter(encapId));
+        ASSERT_EQ(SAI_STATUS_SUCCESS, orchgent_stub.createVirtualRouter(decapId));
         ASSERT_TRUE(vxlan_tunnel_orch->createVxlanTunnelMap(exist_tunnel_name, TUNNEL_MAP_T_VIRTUAL_ROUTER,
                                                             vni, encapId, decapId));
 
@@ -706,9 +804,9 @@ namespace VxlanOrchCppTest
 
         /* Validate in SAI */
         sai_attribute_t attr;
-        std::vector<bool> validated_is_encap = {true, false};
+        vector<bool> validated_is_encap = {true, false};
         for (const bool& is_encap : validated_is_encap) {
-            std::vector<sai_attr_id_t> validated_attr_ids = { SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE,
+            vector<sai_attr_id_t> validated_attr_ids = { SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE,
                                                               SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP };
 
             const auto validated_obj_id = (is_encap)?encap_tunnel_map_id:decap_tunnel_map_id;
@@ -765,34 +863,21 @@ namespace VxlanOrchCppTest
         }
 
         ASSERT_TRUE(vxlan_tunnel_orch->removeVxlanTunnelMap(exist_tunnel_name, vni));
-    }
-
-    TEST_F(VxlanTunnelOrchTest, VxlanTunnelRemoval)
-    {
-        /* Add for coverage test, DEL_COMMAND is not supported yet */
-        string exist_tunnel_name = "tunnel1";
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
-                { { exist_tunnel_name,
-                    DEL_COMMAND,
-                    {
-                    }
-                } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_tunnel_orch)->doTask(*consumer);
+        doVxlanTunnelOrchTask(setData, DEL_COMMAND);
     }
 
     class VxlanTunnelMapOrchTest : public Test
     {
     public:
-        ConsumerExtend *consumer;
+        //ConsumerExtend *consumer;
         VxlanTunnelMapOrch *vxlan_tunnel_map_orch;
         VxlanTunnelOrch *vxlan_tunnel_orch;
 
         VxlanTunnelMapOrchTest()
         {
-            m_configDb = std::make_shared<swss::DBConnector>(CONFIG_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_applDb = std::make_shared<swss::DBConnector>(APPL_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_stateDb = std::make_shared<swss::DBConnector>(STATE_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_configDb = make_shared<DBConnector>(CONFIG_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_applDb = make_shared<DBConnector>(APPL_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_stateDb = make_shared<DBConnector>(STATE_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
         }
 
         ~VxlanTunnelMapOrchTest()
@@ -801,7 +886,7 @@ namespace VxlanOrchCppTest
 
         void SetUp()
         {
-            ASSERT_TRUE(orchgent_stub.do_init() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
             const int portsorch_base_pri = 40;
 
             vector<table_name_with_pri_t> ports_tables = {
@@ -821,20 +906,35 @@ namespace VxlanOrchCppTest
                 gDirectory.set(vxlan_tunnel_orch);
             }
 
-            consumer = new ConsumerExtend(new swss::ConsumerStateTable(m_configDb.get(), std::string(CFG_VXLAN_TUNNEL_MAP_TABLE_NAME), 1, 1), vxlan_tunnel_map_orch, CFG_VXLAN_TUNNEL_MAP_TABLE_NAME);
+            //consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_MAP_TABLE_NAME), 1, 1), vxlan_tunnel_map_orch, CFG_VXLAN_TUNNEL_MAP_TABLE_NAME);
         }
 
         void TearDown()
         {
-            delete consumer;
+            //delete consumer;
             delete vxlan_tunnel_map_orch;
-            ASSERT_TRUE(orchgent_stub.do_uninit() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
 
-        void create_tunnel_in_tunnelorch(string tunnel_name)
+        void doVxlanTunnelMapOrchTask(const deque<KeyOpFieldsValuesTuple>& entries, const string command = SET_COMMAND)
         {
-            ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new swss::ConsumerStateTable(m_configDb.get(), std::string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
-            auto setData = std::deque<KeyOpFieldsValuesTuple>(
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_MAP_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_tunnel_map_orch, CFG_VXLAN_TUNNEL_MAP_TABLE_NAME));
+            deque<KeyOpFieldsValuesTuple> tmp(entries);
+
+            for (auto it = tmp.begin(); it != tmp.end(); ++it)
+            {
+                get<1>(*it) = command;
+            }
+
+            consumerAddToSync(consumer.get(), tmp);
+            ((Orch *) vxlan_tunnel_map_orch)->doTask(*consumer.get());
+        }
+
+        void createTunnelInTunnelorch(string tunnel_name)
+        {
+            //ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
+            auto vxlan_tunnel_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
+            auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_name,
                         SET_COMMAND,
                         {
@@ -843,11 +943,11 @@ namespace VxlanOrchCppTest
                         }
                     } });
 
-            vxlan_tunnel_consumer->addToSync(setData);
-            ((Orch *) vxlan_tunnel_orch)->doTask(*vxlan_tunnel_consumer);
+            consumerAddToSync(vxlan_tunnel_consumer.get(), setData);
+            ((Orch *) vxlan_tunnel_orch)->doTask(*vxlan_tunnel_consumer.get());
             VxlanTunnel tunnel1 = VxlanTunnel(tunnel_name, IpAddress("91.91.91.92"), IpAddress("101.101.101.102"));
             ASSERT_TRUE(tunnel1.createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
-            delete vxlan_tunnel_consumer;
+            //delete vxlan_tunnel_consumer;
 
         }
     };
@@ -856,23 +956,22 @@ namespace VxlanOrchCppTest
     {
         sai_object_id_t nh_id = SAI_NULL_OBJECT_ID;
         uint16_t vlan_id = 10;
-        string vlan_key = "Vlan" + std::to_string(vlan_id);
+        string vlan_alias = "Vlan" + to_string(vlan_id);
         string exist_tunnel_name = "tunnel1";
         string tunnel_map_name = exist_tunnel_name+":map1";
 
-        create_tunnel_in_tunnelorch(exist_tunnel_name);
-        orchgent_stub.create_vlan_in_portorch(vlan_id);
+        createTunnelInTunnelorch(exist_tunnel_name);
+        orchgent_stub.createVlanInPortorch(vlan_id);
 
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_map_name,
                         SET_COMMAND,
                         {
                           {"vni", "32768"},
-                          {"vlan", vlan_key}
+                          {"vlan", vlan_alias}
                         }
                     } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_tunnel_map_orch)->doTask(*consumer);
+        doVxlanTunnelMapOrchTask(setData);
 
         /* Validate in local memory */
         ASSERT_TRUE(vxlan_tunnel_map_orch->vxlan_tunnel_map_table_.find(tunnel_map_name)!= vxlan_tunnel_map_orch->vxlan_tunnel_map_table_.end());
@@ -881,7 +980,7 @@ namespace VxlanOrchCppTest
         /* Validate in SAI */
         const auto tunnel_map_oid = vxlan_tunnel_map_orch->vxlan_tunnel_map_table_[tunnel_map_name];
         sai_attribute_t attr;
-        std::vector<sai_attr_id_t> validated_attr_ids = { SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE,
+        vector<sai_attr_id_t> validated_attr_ids = { SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE,
                                                           SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP };
 
         for (const sai_attr_id_t& attr_id : validated_attr_ids) {
@@ -900,35 +999,23 @@ namespace VxlanOrchCppTest
             }
 
         }
-    }
 
-    TEST_F(VxlanTunnelMapOrchTest, TunnelMapRemoval)
-    {
-        /* Add for coverage test, DEL_COMMAND is not supported yet */
-        auto setData_del = std::deque<KeyOpFieldsValuesTuple>(
-                    { { "del_tunnel:map1",
-                        DEL_COMMAND,
-                        {
-                        }
-                    } });
-
-        consumer->addToSync(setData_del);
-        ((Orch *) vxlan_tunnel_map_orch)->doTask(*consumer);
+        doVxlanTunnelMapOrchTask(setData, DEL_COMMAND);
     }
 
     class VxlanVrfMapOrchTest : public Test
     {
     public:
-        ConsumerExtend *consumer;
+        //ConsumerExtend *consumer;
         VxlanVrfMapOrch *vxlan_vrf_orch;
         VxlanTunnelOrch *vxlan_tunnel_orch;
         VRFOrch *vrf_orch;
 
         VxlanVrfMapOrchTest()
         {
-            m_configDb = std::make_shared<swss::DBConnector>(CONFIG_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_applDb = std::make_shared<swss::DBConnector>(APPL_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
-            m_stateDb = std::make_shared<swss::DBConnector>(STATE_DB, swss::DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_configDb = make_shared<DBConnector>(CONFIG_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_applDb = make_shared<DBConnector>(APPL_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
+            m_stateDb = make_shared<DBConnector>(STATE_DB, DBConnector::DEFAULT_UNIXSOCKET, 0);
         }
 
         ~VxlanVrfMapOrchTest()
@@ -937,7 +1024,7 @@ namespace VxlanOrchCppTest
 
         void SetUp()
         {
-            ASSERT_TRUE(orchgent_stub.do_init() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
             vxlan_vrf_orch = new VxlanVrfMapOrch(m_applDb.get(), APP_VXLAN_VRF_TABLE_NAME);
             //vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
 
@@ -955,14 +1042,28 @@ namespace VxlanOrchCppTest
                 gDirectory.set(vxlan_tunnel_orch);
             }
 
-            consumer = new ConsumerExtend(new swss::ConsumerStateTable(m_applDb.get(), std::string(APP_VXLAN_VRF_TABLE_NAME), 1, 1), vxlan_vrf_orch, APP_VXLAN_VRF_TABLE_NAME);
+            //consumer = new ConsumerExtend(new ConsumerStateTable(m_applDb.get(), string(APP_VXLAN_VRF_TABLE_NAME), 1, 1), vxlan_vrf_orch, APP_VXLAN_VRF_TABLE_NAME);
         }
 
         void TearDown()
         {
-            delete consumer;
+            //delete consumer;
             delete vxlan_vrf_orch;
-            ASSERT_TRUE(orchgent_stub.do_uninit() == SAI_STATUS_SUCCESS);
+            ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
+        }
+
+        void doVxlanVrfMapOrchTask(const deque<KeyOpFieldsValuesTuple>& entries, const string command = SET_COMMAND)
+        {
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VXLAN_VRF_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_vrf_orch, APP_VXLAN_VRF_TABLE_NAME));
+            deque<KeyOpFieldsValuesTuple> tmp(entries);
+
+            for (auto it = tmp.begin(); it != tmp.end(); ++it)
+            {
+                get<1>(*it) = command;
+            }
+
+            consumerAddToSync(consumer.get(), tmp);
+            ((Orch *) vxlan_vrf_orch)->doTask(*consumer.get());
         }
     };
 
@@ -971,21 +1072,20 @@ namespace VxlanOrchCppTest
         string exist_tunnel_name = "tunnel1";
         string exist_vrf_name = "existVRF";
         uint32_t vni = 32768;
-        orchgent_stub.create_vrf_in_vrforch(exist_vrf_name);
+        orchgent_stub.createVrfInVrforch(exist_vrf_name);
         string tunnel_map_name = exist_tunnel_name+":map1";
-        orchgent_stub.create_tunnel_in_tunnelorch(exist_tunnel_name);
-        auto vrf_id = vrf_orch->getVRFid(exist_vrf_name);
+        orchgent_stub.createTunnelInTunnelorch(exist_tunnel_name);
+        //auto vrf_id = vrf_orch->getVRFid(exist_vrf_name);
         auto exist_tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(exist_tunnel_name);
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_map_name,
                         SET_COMMAND,
                         {
-                          {"vni", std::to_string(vni)},
+                          {"vni", to_string(vni)},
                           {"vrf", exist_vrf_name}
                         }
                     } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_vrf_orch)->doTask(*consumer);
+        doVxlanVrfMapOrchTask(setData);
 
         /* Validate in local memory */
         ASSERT_TRUE(vxlan_vrf_orch->vxlan_vrf_table_.find(tunnel_map_name)!= vxlan_vrf_orch->vxlan_vrf_table_.end());
@@ -1001,7 +1101,7 @@ namespace VxlanOrchCppTest
         ASSERT_NE(tunnel_encap_id, SAI_NULL_OBJECT_ID);
         ASSERT_NE(tunnel_decap_id, SAI_NULL_OBJECT_ID);
 
-        /* TODO - Validate in SAI */
+        doVxlanVrfMapOrchTask(setData, DEL_COMMAND);
     }
 
     TEST_F(VxlanVrfMapOrchTest, VrfMapCreationWhenVrfNotExist)
@@ -1009,8 +1109,8 @@ namespace VxlanOrchCppTest
         string exist_tunnel_name = "tunnel1";
         string tunnel_map_name = exist_tunnel_name+":map1";
         string non_exist_vrf_name = "nonexistVRF";
-        orchgent_stub.create_tunnel_in_tunnelorch(exist_tunnel_name);
-        auto setData = std::deque<KeyOpFieldsValuesTuple>(
+        orchgent_stub.createTunnelInTunnelorch(exist_tunnel_name);
+        auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_map_name,
                         SET_COMMAND,
                         {
@@ -1018,27 +1118,13 @@ namespace VxlanOrchCppTest
                           {"vrf", non_exist_vrf_name}
                         }
                     } });
-        consumer->addToSync(setData);
-        ((Orch *) vxlan_vrf_orch)->doTask(*consumer);
+        doVxlanVrfMapOrchTask(setData);
 
         /* Validate in local memory */
         ASSERT_TRUE(vxlan_vrf_orch->vxlan_vrf_table_.find(tunnel_map_name) == vxlan_vrf_orch->vxlan_vrf_table_.end());
+
+        doVxlanVrfMapOrchTask(setData, DEL_COMMAND);
     }
 
-    TEST_F(VxlanVrfMapOrchTest, VrfMapRemoval)
-    {
-        /* Add for coverage test, DEL_COMMAND is not supported yet */
-        string exist_tunnel_name = "tunnel1";
-        string tunnel_map_name = exist_tunnel_name+":map1";
-
-        auto setData_del = std::deque<KeyOpFieldsValuesTuple>(
-            { { tunnel_map_name,
-                DEL_COMMAND,
-                {
-                }
-            } });
-        consumer->addToSync(setData_del);
-        ((Orch *) vxlan_vrf_orch)->doTask(*consumer);
-    }
 }
 
