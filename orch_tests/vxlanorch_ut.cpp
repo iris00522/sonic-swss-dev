@@ -103,43 +103,6 @@ static inline uint32_t tunnel_map_val (MAP_T map_t)
     return vxlanTunnelMapKeyVal.at(map_t).second;
 }
 
-static const char* profile_get_value(
-    _In_ sai_switch_profile_id_t profile_id,
-    _In_ const char* variable)
-{
-    // UNREFERENCED_PARAMETER(profile_id);
-
-    if (!strcmp(variable, "SAI_KEY_INIT_CONFIG_FILE")) {
-        return "/usr/share/sai_2410.xml"; // FIXME: create a json file, and passing the path into test
-    } else if (!strcmp(variable, "KV_DEVICE_MAC_ADDRESS")) {
-        return "20:03:04:05:06:00";
-    } else if (!strcmp(variable, "SAI_KEY_L3_ROUTE_TABLE_SIZE")) {
-        return "1000";
-    } else if (!strcmp(variable, "SAI_KEY_L3_NEIGHBOR_TABLE_SIZE")) {
-        return "2000";
-    } else if (!strcmp(variable, "SAI_VS_SWITCH_TYPE")) {
-        return "SAI_VS_SWITCH_TYPE_BCM56850";
-    }
-
-    return NULL;
-}
-
-static int profile_get_next_value(
-    _In_ sai_switch_profile_id_t profile_id,
-    _Out_ const char** variable,
-    _Out_ const char** value)
-{
-    if (value == NULL) {
-        return 0;
-    }
-
-    if (variable == NULL) {
-        return -1;
-    }
-
-    return -1;
-}
-
 namespace VxlanOrchCppTest
 {
     using namespace testing;
@@ -342,7 +305,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
 
         void createVlanInPortorch(uint16_t vlan_id)
         {
-            //ConsumerExtend *consumer_port;
             string vlan_alias = "Vlan" + to_string(vlan_id);
             port_table_init();
             auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VLAN_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_VLAN_TABLE_NAME));
@@ -356,8 +318,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 } });
             consumerAddToSync(consumer.get(), setData);
             ((Orch *) gPortsOrch)->doTask(*consumer.get());
-            //consumer_port->addToSync(setData_port);
-            //((Orch *) gPortsOrch)->doTask(*consumer_port);
         }
 
         void createVrfInVrforch(string vrf_name)
@@ -371,9 +331,8 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 vrf_orch = new VRFOrch(m_applDb.get(), APP_VRF_TABLE_NAME);
                 gDirectory.set(vrf_orch);
             }
-            //ConsumerExtend *consumer_vrf = new ConsumerExtend(new ConsumerStateTable(m_applDb.get(), string(APP_VRF_TABLE_NAME), 1, 1), vrf_orch, APP_VRF_TABLE_NAME);
-            //auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VRF_TABLE_NAME, 1, 1), vrf_orch, APP_VRF_TABLE_NAME));
-            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VRF_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vrf_orch, APP_VRF_TABLE_NAME));   
+
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_VRF_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vrf_orch, APP_VRF_TABLE_NAME));
             auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { vrf_name,
                     SET_COMMAND,
@@ -388,8 +347,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 } });
             consumerAddToSync(consumer.get(), setData);
             ((Orch *) vrf_orch)->doTask(*consumer.get());
-            //consumer_vrf->addToSync(setData_vrf);
-            //((Orch *) vrf_orch)->doTask(*consumer_vrf);
         }
 
         void createTunnelInTunnelorch(string tunnel_name)
@@ -400,8 +357,7 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
                 gDirectory.set(vxlan_tunnel_orch);
             }
-            
-            //ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
+
             auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_name,
                         SET_COMMAND,
@@ -410,13 +366,11 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                           {"dst_ip", "101.101.101.102"}
                         }
                     } });
-            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
-            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME)); 
-            
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
             consumerAddToSync(consumer.get(), setData);
-            
-            //vxlan_tunnel_consumer->addToSync(setData);
             ((Orch *) vxlan_tunnel_orch)->doTask(*consumer.get());
+
+            /* Active Tunnel */
             VxlanTunnel tunnel1 = VxlanTunnel(tunnel_name, IpAddress("91.91.91.92"), IpAddress("101.101.101.102"));
             ASSERT_TRUE(tunnel1.createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
         }
@@ -424,9 +378,8 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
     private:
         void port_table_init(void)
         {
-            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
             auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
-            
+
             consumerAddToSync(consumer.get(), { { "PortInitDone", EMPTY_PREFIX, {} } });
             ((Orch *) gPortsOrch)->doTask(*consumer.get());
             ASSERT_TRUE(gPortsOrch->isInitDone());
@@ -462,22 +415,24 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
         {
             sai_attribute_t attr;
             auto encap_obj_id = tunnel.getEncapMapId();
-            if (tunnel.tunnel_map_.first != MAP_T::MAP_TO_INVALID) {
+            if (tunnel.tunnel_map_.first != MAP_T::MAP_TO_INVALID)
+            {
                 ASSERT_TRUE(encap_obj_id != SAI_NULL_OBJECT_ID);
                 attr.id = SAI_TUNNEL_MAP_ATTR_TYPE;
                 auto status = sai_tunnel_api->get_tunnel_map_attribute(encap_obj_id, 1, &attr);
                 ASSERT_TRUE(status == SAI_STATUS_SUCCESS);
                 ASSERT_TRUE(attr.value.s32 == tunnel_map_type(tunnel.tunnel_map_.first));
             }
-            else {
+            else
+            {
                 ASSERT_TRUE(encap_obj_id == SAI_NULL_OBJECT_ID);
             }
 
-
             auto decap_obj_id = tunnel.getDecapMapId();
+            ASSERT_NE(decap_obj_id, SAI_NULL_OBJECT_ID);
+
             if (tunnel.tunnel_map_.second != MAP_T::MAP_TO_INVALID)
             {
-                ASSERT_TRUE(decap_obj_id != SAI_NULL_OBJECT_ID);
                 attr.id = SAI_TUNNEL_MAP_ATTR_TYPE;
                 auto status = sai_tunnel_api->get_tunnel_map_attribute(decap_obj_id, 1, &attr);
                 ASSERT_TRUE(status == SAI_STATUS_SUCCESS);
@@ -535,7 +490,7 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
 
     };
 
-    TEST_F(VxlanTunnelTest, CreateTunnel) {
+    TEST_F(VxlanTunnelTest, createTunnel) {
         const map<MAP_T, MAP_T> tunnel_map_pattern =
         {
             /*  enacap type             decap type       */
@@ -565,7 +520,7 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
     }
 
 
-    TEST_F(VxlanTunnelTest, NextHopRefCount)
+    TEST_F(VxlanTunnelTest, nextHopRefCount)
     {
         string tunnel_name = "tunnel";
         IpAddress src_ip = IpAddress("1.1.1.1"), dst_ip = IpAddress("2.2.2.2");
@@ -601,7 +556,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
 	class VxlanTunnelOrchTest : public Test
     {
     public:
-        //ConsumerExtend *consumer;
         VxlanTunnelOrch *vxlan_tunnel_orch;
 
         VxlanTunnelOrchTest()
@@ -619,21 +573,18 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
         {
             ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
             vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
-            //consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
         }
 
         void TearDown()
         {
-            //delete consumer;
-            //delete vxlan_tunnel_orch;
+            delete vxlan_tunnel_orch;
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
 
         void doVxlanTunnelOrchTask(const deque<KeyOpFieldsValuesTuple>& entries, const string command = SET_COMMAND)
         {
-            //auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
-            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME)); 
-            
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
+
             deque<KeyOpFieldsValuesTuple> tmp(entries);
 
             for (auto it = tmp.begin(); it != tmp.end(); ++it)
@@ -647,7 +598,7 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
 
     };
 
-    TEST_F(VxlanTunnelOrchTest, CreateNextHopWhenTunnelNonExist)
+    TEST_F(VxlanTunnelOrchTest, createNextHopWhenTunnelNonExist)
     {
         sai_object_id_t nh_id = SAI_NULL_OBJECT_ID;
         tunnelEndpoint endp;
@@ -677,7 +628,7 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
         doVxlanTunnelOrchTask(setData, DEL_COMMAND);
     }
 
-    TEST_F(VxlanTunnelOrchTest, CreateNextHopWhenTunnelExist)
+    TEST_F(VxlanTunnelOrchTest, createNextHopWhenTunnelExist)
     {
         sai_object_id_t nh_id = SAI_NULL_OBJECT_ID;
         tunnelEndpoint endp;
@@ -869,7 +820,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
     class VxlanTunnelMapOrchTest : public Test
     {
     public:
-        //ConsumerExtend *consumer;
         VxlanTunnelMapOrch *vxlan_tunnel_map_orch;
         VxlanTunnelOrch *vxlan_tunnel_orch;
 
@@ -905,13 +855,10 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
                 gDirectory.set(vxlan_tunnel_orch);
             }
-
-            //consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_MAP_TABLE_NAME), 1, 1), vxlan_tunnel_map_orch, CFG_VXLAN_TUNNEL_MAP_TABLE_NAME);
         }
 
         void TearDown()
         {
-            //delete consumer;
             delete vxlan_tunnel_map_orch;
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
@@ -932,7 +879,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
 
         void createTunnelInTunnelorch(string tunnel_name)
         {
-            //ConsumerExtend *vxlan_tunnel_consumer = new ConsumerExtend(new ConsumerStateTable(m_configDb.get(), string(CFG_VXLAN_TUNNEL_TABLE_NAME), 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME);
             auto vxlan_tunnel_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME, 1, 1), vxlan_tunnel_orch, CFG_VXLAN_TUNNEL_TABLE_NAME));
             auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_name,
@@ -947,8 +893,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
             ((Orch *) vxlan_tunnel_orch)->doTask(*vxlan_tunnel_consumer.get());
             VxlanTunnel tunnel1 = VxlanTunnel(tunnel_name, IpAddress("91.91.91.92"), IpAddress("101.101.101.102"));
             ASSERT_TRUE(tunnel1.createTunnel(MAP_T::VRID_TO_VNI, MAP_T::VNI_TO_VRID));
-            //delete vxlan_tunnel_consumer;
-
         }
     };
 
@@ -1006,7 +950,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
     class VxlanVrfMapOrchTest : public Test
     {
     public:
-        //ConsumerExtend *consumer;
         VxlanVrfMapOrch *vxlan_vrf_orch;
         VxlanTunnelOrch *vxlan_tunnel_orch;
         VRFOrch *vrf_orch;
@@ -1026,7 +969,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
         {
             ASSERT_TRUE(orchgent_stub.saiInit() == SAI_STATUS_SUCCESS);
             vxlan_vrf_orch = new VxlanVrfMapOrch(m_applDb.get(), APP_VXLAN_VRF_TABLE_NAME);
-            //vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
 
             vrf_orch = gDirectory.get<VRFOrch*>();
             if (!vrf_orch)
@@ -1041,13 +983,10 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
                 vxlan_tunnel_orch = new VxlanTunnelOrch(m_configDb.get(), CFG_VXLAN_TUNNEL_TABLE_NAME);
                 gDirectory.set(vxlan_tunnel_orch);
             }
-
-            //consumer = new ConsumerExtend(new ConsumerStateTable(m_applDb.get(), string(APP_VXLAN_VRF_TABLE_NAME), 1, 1), vxlan_vrf_orch, APP_VXLAN_VRF_TABLE_NAME);
         }
 
         void TearDown()
         {
-            //delete consumer;
             delete vxlan_vrf_orch;
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
@@ -1075,7 +1014,6 @@ size_t consumerAddToSync(Consumer* consumer, const deque<KeyOpFieldsValuesTuple>
         orchgent_stub.createVrfInVrforch(exist_vrf_name);
         string tunnel_map_name = exist_tunnel_name+":map1";
         orchgent_stub.createTunnelInTunnelorch(exist_tunnel_name);
-        //auto vrf_id = vrf_orch->getVRFid(exist_vrf_name);
         auto exist_tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(exist_tunnel_name);
         auto setData = deque<KeyOpFieldsValuesTuple>(
                     { { tunnel_map_name,
