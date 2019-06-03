@@ -1,6 +1,6 @@
 #Language:        Cpp
 AccessModifierOffset: -4
-AlignAfterOpenBracket: DontAlign
+AlignAfterOpenBracket: Align
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false #變數宣告對齊
 AlignEscapedNewlines: Right
@@ -84,10 +84,10 @@ ObjCSpaceBeforeProtocolList: true
 #PenaltyBreakString: 1000
 #PenaltyExcessCharacter: 1000000
 #PenaltyReturnTypeOnItsOwnLine: 60
-PointerAlignment: Right
+PointerAlignment: Left
 ReflowComments:  true
-SortIncludes:    true #include 排序
-SortUsingDeclarations: true #變數 排序
+SortIncludes:    false #include 排序
+SortUsingDeclarations: false #變數 排序
 SpaceAfterCStyleCast: true
 SpaceAfterTemplateKeyword: true
 SpaceBeforeAssignmentOperators: true
