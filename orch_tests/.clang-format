@@ -2,7 +2,7 @@
 AccessModifierOffset: -4
 AlignAfterOpenBracket: Align
 AlignConsecutiveAssignments: false
-AlignConsecutiveDeclarations: false #變數宣告對齊
+AlignConsecutiveDeclarations: false
 AlignEscapedNewlines: Right
 #AlignOperands:   false
 AlignTrailingComments: true
@@ -18,7 +18,7 @@ AlwaysBreakBeforeMultilineStrings: false
 AlwaysBreakTemplateDeclarations: false
 BinPackArguments: true
 BinPackParameters: true
-BraceWrapping:   
+BraceWrapping:
   AfterClass: true
   AfterControlStatement: true
   AfterEnum: true
@@ -45,7 +45,7 @@ CommentPragmas:  '^ IWYU pragma:'
 CompactNamespaces: true
 ConstructorInitializerAllOnOneLineOrOnePerLine: true
 ConstructorInitializerIndentWidth: 4
-ContinuationIndentWidth: 0  #縮排 影響 array && SWSS_LOG_NOTICE
+ContinuationIndentWidth: 0
 Cpp11BracedListStyle: false
 DerivePointerAlignment: false
 DisableFormat:   false
@@ -84,11 +84,11 @@ ObjCSpaceBeforeProtocolList: true
 #PenaltyBreakString: 1000
 #PenaltyExcessCharacter: 1000000
 #PenaltyReturnTypeOnItsOwnLine: 60
-PointerAlignment: Left
+PointerAlignment: Right
 ReflowComments:  true
-SortIncludes:    false #include 排序
-SortUsingDeclarations: false #變數 排序
-SpaceAfterCStyleCast: true
+SortIncludes:    false
+SortUsingDeclarations: false
+SpaceAfterCStyleCast: false
 SpaceAfterTemplateKeyword: true
 SpaceBeforeAssignmentOperators: true
 SpaceBeforeParens: ControlStatements
@@ -102,5 +102,3 @@ SpacesInSquareBrackets: false
 #Standard:        Cpp11
 TabWidth:        4
 UseTab:          Never
-
-...
