@@ -14,6 +14,8 @@
 #include "tokenize.h"
 #include "subscriberstatetable.h"
 
+#define  _dbg_ printf("%s %d \r\n",__FUNCTION__,__LINE__);
+
 using namespace std;
 using namespace swss;
 
@@ -128,8 +130,19 @@ namespace VnetOrchTest
     };
 
     OrchagentStub orchgent_stub;
+    
+    struct VnetTestBase : public ::testing::Test {
+        vector<int32_t*> m_s32list_pool;
+    
+        virtual ~VnetTestBase()
+        {
+            for (auto p : m_s32list_pool) {
+                free(p);
+            }
+        }
+    };
 
-    class VnetOrchTest : public Test
+    class VnetOrchTest : public VnetTestBase
     {
     public:
         VNetOrch *vnet_orch;
@@ -147,10 +160,6 @@ namespace VnetOrchTest
 
         ~VnetOrchTest()
         {
-            delete vxlan_tunnel_orch;
-            delete vrf_orch;
-            delete vnet_rt_orch;
-            delete vnet_orch;
         }
 
         void SetUp()
@@ -207,8 +216,60 @@ namespace VnetOrchTest
         {
             delete gPortsOrch;
             delete gIntfsOrch;
+            delete vxlan_tunnel_orch;
+            delete vrf_orch;
+            delete vnet_rt_orch;
+            delete vnet_orch;            
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
+
+        bool validate_vxlan_tunnel(sai_object_type_t objecttype, SaiAttributeList& exp_attrlist_2, string tunnel_name , sai_object_id_t tunnel_map_entry_id)
+        {        
+            auto& exp_attrlist = exp_attrlist_2;
+            
+            vector<sai_attribute_t> act_attr;
+
+            for (uint32_t i = 0; i < exp_attrlist.get_attr_count(); ++i) {
+                const auto attr = exp_attrlist.get_attr_list()[i];
+                auto meta = sai_metadata_get_attr_metadata(objecttype, attr.id);
+    
+                if (meta == nullptr) {
+                    return false;
+                }
+    
+                sai_attribute_t new_attr;
+                memset(&new_attr, 0, sizeof(new_attr));
+    
+                new_attr.id = attr.id;
+    
+                switch (meta->attrvaluetype) {
+                case SAI_ATTR_VALUE_TYPE_INT32_LIST:
+                    new_attr.value.s32list.list = (int32_t*)malloc(sizeof(int32_t) * attr.value.s32list.count);
+                    new_attr.value.s32list.count = attr.value.s32list.count;
+                    m_s32list_pool.emplace_back(new_attr.value.s32list.list);
+                    break;
+    
+                default:
+                    // do nothing
+                    ;
+                }
+    
+                act_attr.emplace_back(new_attr);
+            }
+                        
+            auto status = sai_tunnel_api->get_tunnel_map_entry_attribute(tunnel_map_entry_id, (uint32_t)act_attr.size(),  act_attr.data());
+            if (status != SAI_STATUS_SUCCESS) {
+                return false;
+            }
+    
+            auto b_attr_eq = Check::AttrListEq(objecttype, act_attr, exp_attrlist);
+            if (!b_attr_eq) {
+                return false;
+            }
+    
+            return true;
+        }
+
 
         bool create_vxlan_tunnel(string tunnel_name, string src_ip)
         {
@@ -228,7 +289,45 @@ namespace VnetOrchTest
             return true;
 
         }
+        
+        bool check_vxlan_tunnel_entry(string tunnel_name, string vnet_name, uint32_t vni_id)
+        {_dbg_;
+            const auto tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(tunnel_name);
+            const auto decap_id = tunnel_obj->getDecapMapId();
+            const auto encap_id = tunnel_obj->getEncapMapId();
+            _dbg_;
 
+            const auto encap_tunnel_map_id = tunnel_obj->tunnel_map_entries_[vni_id].first;
+            const auto decap_tunnel_map_id = tunnel_obj->tunnel_map_entries_[vni_id].second; 
+            _dbg_;
+            auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(vnet_name);
+            _dbg_;
+            {
+                auto v = vector<swss::FieldValueTuple>(
+                    { { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE", "SAI_TUNNEL_MAP_TYPE_VIRTUAL_ROUTER_ID_TO_VNI" },
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP", to_string(decap_id) },
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_KEY", to_string(vnet_obj->getVRidIngress())},
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_VALUE", to_string(vni_id) }});
+                SaiAttributeList expect_attr_list(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, v, false);
+              _dbg_;  
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, expect_attr_list, tunnel_name, decap_tunnel_map_id) == false)
+                    return false;
+            }
+        _dbg_;
+            {
+                auto v = vector<swss::FieldValueTuple>(
+                    { { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE", "SAI_TUNNEL_MAP_TYPE_VNI_TO_VIRTUAL_ROUTER_ID" },
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP", to_string(encap_id)},
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_KEY", to_string(vni_id) },
+                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_VALUE",to_string(vnet_obj->getVRidEgress()) }});
+                SaiAttributeList expect_attr_list(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, v, false);
+                
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, expect_attr_list, tunnel_name , encap_tunnel_map_id) == false)
+                    return false;
+            }
+            return true;
+        }
+        
         bool create_vnet_entry(string name, string tunnel, string vni, string peer_list)
         {
             auto vnet_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_configDb.get(), APP_VNET_TABLE_NAME, 1, 1), vnet_orch, APP_VNET_TABLE_NAME));
@@ -251,6 +350,7 @@ namespace VnetOrchTest
             return true;
 
         }
+
 
         bool create_vlan_interface(int vlan_id, string ifname, string vnet_name, string ipaddr)
         {
@@ -364,6 +464,8 @@ namespace VnetOrchTest
 
         ASSERT_TRUE(create_vxlan_tunnel(tunnel_name, "10.10.10.10") == true);
         ASSERT_TRUE(create_vnet_entry("Vnet_2000", tunnel_name, "2000", "")== true);
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2000", 2000)== true);
+        
         ASSERT_TRUE(create_vlan_interface(100, "Ethernet24", "Vnet_2000", "100.100.3.1/24")== true);
         ASSERT_TRUE(create_vlan_interface(101, "Ethernet28", "Vnet_2000", "100.100.4.1/24")== true);
         ASSERT_TRUE(create_vnet_routes("100.100.1.1/32", "Vnet_2000", "10.10.10.1")== true);
@@ -377,7 +479,8 @@ namespace VnetOrchTest
         ASSERT_TRUE(create_vnet_local_routes("100.102.1.0/24", "Vnet_2001", "Ethernet4")== true);  
 
     }
-    
+
+#if 0    
     //Test 2 - Two VNets, One HSMs per VNet
 
     TEST_F(VnetOrchTest,test_vnet_orch_2)
@@ -427,5 +530,6 @@ namespace VnetOrchTest
 
         ASSERT_TRUE(create_vnet_local_routes("8.8.10.0/24", "Vnet_20", "Vlan2002")== true);
     }
+ #endif   
 }
 
