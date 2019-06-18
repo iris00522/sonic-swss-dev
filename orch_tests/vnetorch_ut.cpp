@@ -174,6 +174,8 @@ namespace VnetOrchTest
                 { APP_LAG_TABLE_NAME,         portsorch_base_pri + 4 },
                 { APP_LAG_MEMBER_TABLE_NAME,  portsorch_base_pri     }
             };
+            
+            gCrmOrch = new CrmOrch(m_configDb.get(), CFG_CRM_TABLE_NAME);
             gPortsOrch = new PortsOrch(m_applDb.get(), ports_tables);
 
             vector<string> vnet_tables = {
@@ -223,14 +225,65 @@ namespace VnetOrchTest
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
 
-        bool validate_vxlan_tunnel(sai_object_type_t objecttype, SaiAttributeList& exp_attrlist_2, string tunnel_name , sai_object_id_t tunnel_map_entry_id)
-        {        
-            auto& exp_attrlist = exp_attrlist_2;
-            
-            vector<sai_attribute_t> act_attr;
+        static bool AttrListEq_for_two_sai_attr(sai_object_type_t objecttype, const std::vector<sai_attribute_t>& act_attr_list, const std::vector<sai_attribute_t>& exp_attr_list)
+        {
+            if (act_attr_list.size() != exp_attr_list.size()) {
+                return false;
+            }
+        
+            for (uint32_t i = 0; i < exp_attr_list.size(); ++i) {
+                sai_attr_id_t id = exp_attr_list[i].id;
+                auto meta = sai_metadata_get_attr_metadata(objecttype, id);
+        
+                assert(meta != nullptr);
+        
+                // The following id can not serialize, check id only
+                if (id == SAI_ACL_TABLE_ATTR_FIELD_ACL_RANGE_TYPE || id == SAI_ACL_BIND_POINT_TYPE_PORT || id == SAI_ACL_BIND_POINT_TYPE_LAG) {
+                    if (id != act_attr_list[i].id) {
+                        auto meta_act = sai_metadata_get_attr_metadata(objecttype, act_attr_list[i].id);
+        
+                        // TODO: Show only on debug mode
+                        if (meta_act) {
+                            std::cerr << "AttrListEq failed\n";
+                            std::cerr << "Actual:   " << meta_act->attridname << "\n";
+                            std::cerr << "Expected: " << meta->attridname << "\n";
+                        }
+                    }
+        
+                    continue;
+                }
+        
+                auto act_str = sai_serialize_attr_value(*meta, act_attr_list[i]);
+                auto exp_str = sai_serialize_attr_value(*meta, exp_attr_list[i]);
+                // TODO: Show only on debug mode
+                if (act_str != exp_str) {
+                    std::cerr << "i:        "<<i<<"\n";
+                    std::cerr << "AttrListEq failed\n";
+                    std::cerr << "Actual:   " << act_str << "\n";
+                    std::cerr << "Expected: " << exp_str << "\n";
+                    return false;
+                }
+            }
+        
+            return true;
+        }
 
-            for (uint32_t i = 0; i < exp_attrlist.get_attr_count(); ++i) {
-                const auto attr = exp_attrlist.get_attr_list()[i];
+        void port_table_init(void)
+        {
+            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
+
+            Portal::ConsumerInternal::addToSync(consumer.get(), { { "PortInitDone", EMPTY_PREFIX, {} } });
+            ((Orch *) gPortsOrch)->doTask(*consumer.get());
+            ASSERT_TRUE(gPortsOrch->isInitDone());
+        }
+
+        bool validate_vxlan_tunnel(sai_object_type_t objecttype, vector<sai_attribute_t> exp_attrlist, sai_object_id_t object_id, sai_route_entry_t *route_entry = nullptr)
+        {        
+            vector<sai_attribute_t> act_attr;
+            sai_status_t status;
+
+            for (uint32_t i = 0; i < exp_attrlist.size(); ++i) {
+                const auto attr = exp_attrlist[i];
                 auto meta = sai_metadata_get_attr_metadata(objecttype, attr.id);
     
                 if (meta == nullptr) {
@@ -239,31 +292,74 @@ namespace VnetOrchTest
     
                 sai_attribute_t new_attr;
                 memset(&new_attr, 0, sizeof(new_attr));
-    
                 new_attr.id = attr.id;
-    
-                switch (meta->attrvaluetype) {
-                case SAI_ATTR_VALUE_TYPE_INT32_LIST:
-                    new_attr.value.s32list.list = (int32_t*)malloc(sizeof(int32_t) * attr.value.s32list.count);
-                    new_attr.value.s32list.count = attr.value.s32list.count;
-                    m_s32list_pool.emplace_back(new_attr.value.s32list.list);
-                    break;
-    
-                default:
-                    // do nothing
-                    ;
+                new_attr.id = attr.id;
+                if( meta->attrvaluetype == SAI_ATTR_VALUE_TYPE_OBJECT_LIST){
+                    new_attr.value.objlist.list = (sai_object_id_t*)malloc(sizeof(sai_object_id_t) * attr.value.objlist.count);
+                    new_attr.value.objlist.count = attr.value.objlist.count;
                 }
-    
+                
+                new_attr.id = attr.id;
                 act_attr.emplace_back(new_attr);
             }
-                        
-            auto status = sai_tunnel_api->get_tunnel_map_entry_attribute(tunnel_map_entry_id, (uint32_t)act_attr.size(),  act_attr.data());
-            if (status != SAI_STATUS_SUCCESS) {
-                return false;
+
+            switch(objecttype)
+            {
+                case SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY:
+                    status = sai_tunnel_api->get_tunnel_map_entry_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                        return false;
+                    }
+                    break;
+                    
+                 case SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY:
+                    status = sai_tunnel_api->get_tunnel_term_table_entry_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                        return false;
+                    }
+                    break;
+                 case SAI_OBJECT_TYPE_TUNNEL:
+                    status = sai_tunnel_api->get_tunnel_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                        return false;
+                    }
+                    break;
+                     
+                 case SAI_OBJECT_TYPE_TUNNEL_MAP:
+                    status = sai_tunnel_api->get_tunnel_map_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                    return false;
+                        }
+                    break;
+                    
+                 case SAI_OBJECT_TYPE_ROUTER_INTERFACE:
+                    status = sai_router_intfs_api->get_router_interface_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                     if (status != SAI_STATUS_SUCCESS) {
+                         return false;
+                     }
+                     break;
+                     
+                 case SAI_OBJECT_TYPE_NEXT_HOP:    
+                    status = sai_next_hop_api->get_next_hop_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                     if (status != SAI_STATUS_SUCCESS) {
+                         return false;
+                     }
+                     break;
+                     
+                 case SAI_OBJECT_TYPE_ROUTE_ENTRY:
+                    status = sai_route_api->get_route_entry_attribute(route_entry, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                        return false;
+                    }
+                    break;
+                     
+                default:
+                    return false;
             }
-    
-            auto b_attr_eq = Check::AttrListEq(objecttype, act_attr, exp_attrlist);
+            
+            auto b_attr_eq = AttrListEq_for_two_sai_attr(objecttype, act_attr, exp_attrlist);
             if (!b_attr_eq) {
+                 _dbg_;
                 return false;
             }
     
@@ -289,40 +385,162 @@ namespace VnetOrchTest
             return true;
 
         }
-        
-        bool check_vxlan_tunnel_entry(string tunnel_name, string vnet_name, uint32_t vni_id)
-        {_dbg_;
+
+        bool check_vxlan_tunnel(string tunnel_name, string src_ip)
+        {
             const auto tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(tunnel_name);
             const auto decap_id = tunnel_obj->getDecapMapId();
             const auto encap_id = tunnel_obj->getEncapMapId();
-            _dbg_;
+
+            //check that the vxlan tunnel termination are there
+            {   
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                
+                attr.id = SAI_TUNNEL_MAP_ATTR_TYPE;
+                attr.value.s32 = SAI_TUNNEL_MAP_TYPE_VNI_TO_VIRTUAL_ROUTER_ID;
+                attrs.push_back(attr);
+            
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP, attrs, decap_id) == false)
+                    return false;
+            }
+
+            {   
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                
+                attr.id = SAI_TUNNEL_MAP_ATTR_TYPE;
+                attr.value.s32 = SAI_TUNNEL_MAP_TYPE_VIRTUAL_ROUTER_ID_TO_VNI;
+                attrs.push_back(attr);
+       
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP, attrs, encap_id) == false)
+                    return false;
+            }
+            
+            {   
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                
+                attr.id = SAI_TUNNEL_ATTR_TYPE;
+                attr.value.s32 = SAI_TUNNEL_TYPE_VXLAN;
+                attrs.push_back(attr);
+            
+                attr.id = SAI_TUNNEL_ATTR_UNDERLAY_INTERFACE;
+                attr.value.oid = gUnderlayIfId;
+                attrs.push_back(attr);
+
+                sai_object_id_t decap_list[] = { decap_id };
+                attr.id = SAI_TUNNEL_ATTR_DECAP_MAPPERS;
+                attr.value.objlist.count = 1;
+                attr.value.objlist.list = decap_list;
+                attrs.push_back(attr);
+
+                sai_object_id_t encap_list[] = { encap_id };
+                attr.id = SAI_TUNNEL_ATTR_ENCAP_MAPPERS;
+                attr.value.objlist.count = 1;
+                attr.value.objlist.list = encap_list;
+                attrs.push_back(attr);
+                
+                sai_ip_address_t ip;
+                copy(ip, IpAddress(src_ip));        
+                attr.id = SAI_TUNNEL_ATTR_ENCAP_SRC_IP;
+                attr.value.ipaddr = ip;
+                attrs.push_back(attr);
+       
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL, attrs, tunnel_obj->ids_.tunnel_id) == false)
+                    return false;
+            }
+
+            {   
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                
+                attr.id = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_TYPE;
+                attr.value.s32 = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_TYPE;
+                attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_VR_ID;
+                attr.value.oid = gVirtualRouterId;
+                attrs.push_back(attr);
+
+
+                sai_ip_address_t ip;
+                copy(ip, IpAddress(src_ip));
+                attr.id = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_DST_IP;
+                attr.value.ipaddr = ip;
+                attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_TUNNEL_TYPE;
+                attr.value.s32 = SAI_TUNNEL_TYPE_VXLAN;
+                attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_TERM_TABLE_ENTRY_ATTR_ACTION_TUNNEL_ID;
+                attr.value.oid = tunnel_obj->ids_.tunnel_id;
+                attrs.push_back(attr);
+                
+
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY, attrs, tunnel_obj->ids_.tunnel_term_id) == false)
+                    return false;
+            }
+
+        }
+
+        
+        bool check_vxlan_tunnel_entry(string tunnel_name, string vnet_name, uint32_t vni_id)
+        {
+            const auto tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(tunnel_name);
+            const auto decap_id = tunnel_obj->getDecapMapId();
+            const auto encap_id = tunnel_obj->getEncapMapId();
 
             const auto encap_tunnel_map_id = tunnel_obj->tunnel_map_entries_[vni_id].first;
             const auto decap_tunnel_map_id = tunnel_obj->tunnel_map_entries_[vni_id].second; 
-            _dbg_;
             auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(vnet_name);
-            _dbg_;
+
+
             {
-                auto v = vector<swss::FieldValueTuple>(
-                    { { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE", "SAI_TUNNEL_MAP_TYPE_VIRTUAL_ROUTER_ID_TO_VNI" },
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP", to_string(decap_id) },
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_KEY", to_string(vnet_obj->getVRidIngress())},
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_VALUE", to_string(vni_id) }});
-                SaiAttributeList expect_attr_list(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, v, false);
-              _dbg_;  
-                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, expect_attr_list, tunnel_name, decap_tunnel_map_id) == false)
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> tunnel_map_entry_attrs;  
+                
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE;
+                attr.value.s32 = SAI_TUNNEL_MAP_TYPE_VIRTUAL_ROUTER_ID_TO_VNI;//e
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP;
+                attr.value.oid = encap_id;
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_KEY;
+                attr.value.oid = vnet_obj->getVRidIngress();
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_VALUE;
+                attr.value.u32 = vni_id;
+                tunnel_map_entry_attrs.push_back(attr);
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, tunnel_map_entry_attrs, encap_tunnel_map_id) == false)
                     return false;
             }
-        _dbg_;
+
             {
-                auto v = vector<swss::FieldValueTuple>(
-                    { { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE", "SAI_TUNNEL_MAP_TYPE_VNI_TO_VIRTUAL_ROUTER_ID" },
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP", to_string(encap_id)},
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_KEY", to_string(vni_id) },
-                        { "SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_VALUE",to_string(vnet_obj->getVRidEgress()) }});
-                SaiAttributeList expect_attr_list(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, v, false);
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> tunnel_map_entry_attrs;
                 
-                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, expect_attr_list, tunnel_name , encap_tunnel_map_id) == false)
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP_TYPE;
+                attr.value.s32 = SAI_TUNNEL_MAP_TYPE_VNI_TO_VIRTUAL_ROUTER_ID;
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_TUNNEL_MAP;
+                attr.value.oid = decap_id;
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VIRTUAL_ROUTER_ID_VALUE;
+                attr.value.oid = vnet_obj->getVRidEgress();
+                tunnel_map_entry_attrs.push_back(attr);
+
+                attr.id = SAI_TUNNEL_MAP_ENTRY_ATTR_VNI_ID_KEY;
+                attr.value.u32 = vni_id;
+                tunnel_map_entry_attrs.push_back(attr);
+
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_TUNNEL_MAP_ENTRY, tunnel_map_entry_attrs, decap_tunnel_map_id) == false)
                     return false;
             }
             return true;
@@ -354,7 +572,7 @@ namespace VnetOrchTest
 
         bool create_vlan_interface(int vlan_id, string ifname, string vnet_name, string ipaddr)
         {
-        
+            port_table_init();
             //create vlan
             string vlan_name = "Vlan" + to_string(vlan_id);
             auto vlan_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VLAN_TABLE_NAME, 1, 1), gPortsOrch, APP_VLAN_TABLE_NAME));
@@ -363,6 +581,7 @@ namespace VnetOrchTest
                         SET_COMMAND,
                         {
                             {"vlanid", to_string(vlan_id)},
+                            {"mtu", "9100"}              
                         }
                     } });  
             Portal::ConsumerInternal::addToSync(vlan_consumer.get(),vlan_setData);
@@ -407,6 +626,55 @@ namespace VnetOrchTest
             return true;
         }
         
+        bool check_router_interface(string name, int vlan){
+            //Check RIF in ingress VRF
+
+            auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+            string vlan_name = "Vlan" + to_string(vlan);
+            sai_object_id_t vlan_oid;
+            Port port;
+            
+            gPortsOrch->getPort(vlan_name, port);
+            vlan_oid = port.m_vlan_info.vlan_oid;
+
+
+            sai_attribute_t attr;
+            std::vector<sai_attribute_t> attrs;
+            
+            attr.id = SAI_ROUTER_INTERFACE_ATTR_VIRTUAL_ROUTER_ID;
+            attr.value.oid = vnet_obj->getVRidIngress();
+            attrs.push_back(attr);
+            
+            attr.id = SAI_ROUTER_INTERFACE_ATTR_SRC_MAC_ADDRESS;
+            memcpy(attr.value.mac, gMacAddress.getMac(), sizeof(sai_mac_t));
+            attrs.push_back(attr);
+            
+            attr.id = SAI_ROUTER_INTERFACE_ATTR_MTU;
+            attr.value.u32 = 9100;
+            attrs.push_back(attr);
+
+            if(vlan_oid)
+            {
+                attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
+                attr.value.s32 = SAI_ROUTER_INTERFACE_TYPE_VLAN;
+                attrs.push_back(attr);
+                
+                attr.id = SAI_ROUTER_INTERFACE_ATTR_VLAN_ID;
+                attr.value.oid = vlan_oid;
+                attrs.push_back(attr);                
+            }
+            else
+            {
+                attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
+                attr.value.s32 = SAI_ROUTER_INTERFACE_TYPE_PORT;
+                attrs.push_back(attr);            
+            }
+            
+            if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTER_INTERFACE, attrs, port.m_rif_id) == false)
+                return false;
+
+        }
+        
         bool create_vnet_routes(string prefix, string vnet_name, string endpoint, string mac="",int vni=0)
         {
             auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VNET_RT_TUNNEL_TABLE_NAME, 1, 1), vnet_rt_orch, APP_VNET_RT_TUNNEL_TABLE_NAME));
@@ -414,7 +682,7 @@ namespace VnetOrchTest
 
             vector<FieldValueTuple> setData =
             { 
-                {"endpoint",  "Vnet_2000"},
+                {"endpoint",  endpoint},
             };
 
             if (vni)
@@ -435,6 +703,73 @@ namespace VnetOrchTest
 
             return true;
         }
+
+        bool check_vnet_routes(string name,string endpoint, string tunnel, string prefix, string mac="", int vni=0)
+        {
+            auto tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(tunnel);
+            sai_object_id_t tunnel_id = tunnel_obj->getTunnelId();   
+            IpAddress endpoint_ip = IpAddress(endpoint);
+            MacAddress tunnel_mac = mac!="" ? MacAddress(mac):gVxlanMacAddress;
+            sai_object_id_t nh_id = tunnel_obj->getNextHop(endpoint_ip, tunnel_mac, vni);
+            auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+
+            // Check routes in ingress VRF
+            {
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                
+                attr.id = SAI_NEXT_HOP_ATTR_TYPE;
+                attr.value.s32 = SAI_NEXT_HOP_TYPE_IP;
+                attrs.push_back(attr);
+
+                sai_ip_address_t ip;
+                copy(ip, IpAddress(endpoint));
+                attr.id = SAI_NEXT_HOP_ATTR_IP;
+                attr.value.ipaddr = ip;
+                attrs.push_back(attr);
+
+                attr.id = SAI_NEXT_HOP_ATTR_TUNNEL_ID;
+                attr.value.oid = tunnel_id;
+                attrs.push_back(attr);
+                
+
+                if (vni)
+                {
+                    attr.id = SAI_NEXT_HOP_ATTR_TUNNEL_VNI;
+                    attr.value.u32 = vni;
+                    attrs.push_back(attr);
+                }
+
+                if (mac!="")
+                {     
+                    attr.id = SAI_NEXT_HOP_ATTR_TUNNEL_MAC;
+                    memcpy(attr.value.mac, tunnel_mac.getMac(), sizeof(sai_mac_t));
+                    attrs.push_back(attr);
+                }
+
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_NEXT_HOP, attrs, nh_id) == false)
+                    return false;
+            }
+            
+            //Check if the route is in expected VRF          
+            {
+                sai_attribute_t attr;
+                std::vector<sai_attribute_t> attrs;
+                sai_route_entry_t route_entry;
+                route_entry.vr_id = vnet_obj->getVRidIngress();
+                route_entry.switch_id = gSwitchId;
+                IpPrefix ip_prefix = IpPrefix(prefix);
+                copy(route_entry.destination,ip_prefix);
+
+                attr.id = SAI_ROUTE_ENTRY_ATTR_NEXT_HOP_ID;
+                attr.value.oid = nh_id;
+                attrs.push_back(attr);
+                
+                if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTE_ENTRY, attrs, 0, &route_entry ) == false)
+                    return false;
+            }
+            return true;
+        }
         
         bool create_vnet_local_routes(string prefix, string vnet_name, string ifname)
         {
@@ -451,8 +786,7 @@ namespace VnetOrchTest
 
             Portal::ConsumerInternal::addToSync(consumer.get(),setData);
             vnet_rt_orch->doTask(*consumer.get());  
-            return true;
-            
+            return true;         
         }
 
     };
@@ -464,11 +798,21 @@ namespace VnetOrchTest
 
         ASSERT_TRUE(create_vxlan_tunnel(tunnel_name, "10.10.10.10") == true);
         ASSERT_TRUE(create_vnet_entry("Vnet_2000", tunnel_name, "2000", "")== true);
+
+        //vnet_obj.check_vnet_entry(dvs, 'Vnet_2000')
         ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2000", 2000)== true);
+        ASSERT_TRUE(check_vxlan_tunnel(tunnel_name, "10.10.10.10")== true);
         
         ASSERT_TRUE(create_vlan_interface(100, "Ethernet24", "Vnet_2000", "100.100.3.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_2000", 100)== true);
+        
         ASSERT_TRUE(create_vlan_interface(101, "Ethernet28", "Vnet_2000", "100.100.4.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_2000", 101)== true);
+        
         ASSERT_TRUE(create_vnet_routes("100.100.1.1/32", "Vnet_2000", "10.10.10.1")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_2000", "10.10.10.1", tunnel_name,"100.100.1.1/32")== true);
+
+        
         ASSERT_TRUE(create_vnet_local_routes("100.100.3.0/24", "Vnet_2000", "Vlan100")== true);
         ASSERT_TRUE(create_vnet_local_routes("100.100.4.0/24", "Vnet_2000", "Vlan101")== true);
 
@@ -477,6 +821,36 @@ namespace VnetOrchTest
         ASSERT_TRUE(create_vlan_interface(100, "Ethernet4", "Vnet_2001", "100.102.1.1/24")== true);
         ASSERT_TRUE(create_vnet_routes("100.100.2.1/32", "Vnet_2001", "10.10.10.2", "00:12:34:56:78:9A")== true);
         ASSERT_TRUE(create_vnet_local_routes("100.102.1.0/24", "Vnet_2001", "Ethernet4")== true);  
+
+
+  /* 
+    
+    
+    create_vnet_local_routes(dvs, "100.100.3.0/24", 'Vnet_2000', 'Vlan100')
+    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2000')
+    
+    create_vnet_local_routes(dvs, "100.100.4.0/24", 'Vnet_2000', 'Vlan101')
+    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2000')
+    
+#Create Physical Interface in another Vnet
+    
+    create_vnet_entry(dvs, 'Vnet_2001', tunnel_name, '2001', "")
+    
+    vnet_obj.check_vnet_entry(dvs, 'Vnet_2001')
+    vnet_obj.check_vxlan_tunnel_entry(dvs, tunnel_name, 'Vnet_2001', '2001')
+    
+    create_phy_interface(dvs, "Ethernet4", "Vnet_2001", "100.102.1.1/24")
+    vnet_obj.check_router_interface(dvs, 'Vnet_2001')
+    
+    create_vnet_routes(dvs, "100.100.2.1/32", 'Vnet_2001', '10.10.10.2', "00:12:34:56:78:9A")
+    vnet_obj.check_vnet_routes(dvs, 'Vnet_2001', '10.10.10.2', tunnel_name, "00:12:34:56:78:9A")
+    
+    create_vnet_local_routes(dvs, "100.102.1.0/24", 'Vnet_2001', 'Ethernet4')
+    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2001')*/
+
+
+
+
 
     }
 
