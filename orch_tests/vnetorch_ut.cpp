@@ -54,6 +54,9 @@ extern sai_tunnel_api_t*            sai_tunnel_api;
 extern sai_next_hop_api_t*          sai_next_hop_api;
 
 extern PortsOrch*       gPortsOrch;
+extern BufferOrch*      gBufferOrch;
+extern IntfsOrch*       gIntfsOrch;
+
 extern Directory<Orch*> gDirectory;
 
 
@@ -212,6 +215,18 @@ namespace VnetOrchTest
                 gDirectory.set(vxlan_tunnel_orch);
             }
 
+            vector<string> buffer_tables = {
+                CFG_BUFFER_POOL_TABLE_NAME,
+                CFG_BUFFER_PROFILE_TABLE_NAME,
+                CFG_BUFFER_QUEUE_TABLE_NAME,
+                CFG_BUFFER_PG_TABLE_NAME,
+                CFG_BUFFER_PORT_INGRESS_PROFILE_LIST_NAME,
+                CFG_BUFFER_PORT_EGRESS_PROFILE_LIST_NAME
+            };
+            gBufferOrch = new BufferOrch(m_configDb.get(), buffer_tables);
+
+            port_table_init();
+
         }
 
         void TearDown()
@@ -270,11 +285,55 @@ namespace VnetOrchTest
 
         void port_table_init(void)
         {
-            auto consumer = unique_ptr<Consumer>(new Consumer(new SubscriberStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, TableConsumable::DEFAULT_POP_BATCH_SIZE, 0), gPortsOrch, APP_PORT_TABLE_NAME));
+            sai_attribute_t attr;
+            sai_status_t status;
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, 1, 1), gPortsOrch, APP_PORT_TABLE_NAME));
 
-            Portal::ConsumerInternal::addToSync(consumer.get(), { { "PortInitDone", EMPTY_PREFIX, {} } });
-            ((Orch *) gPortsOrch)->doTask(*consumer.get());
+            /* Get port number */
+            auto port_count = attr.value.u32;
+            attr.id = SAI_SWITCH_ATTR_PORT_NUMBER;
+            status = sai_switch_api->get_switch_attribute(gSwitchId, 1, &attr);
+            ASSERT_EQ(status, SAI_STATUS_SUCCESS);
+            
+            port_count = attr.value.u32;
+            
+            /* Get port list */
+            vector<sai_object_id_t> portOids;
+            portOids.resize(port_count);
+            attr.id = SAI_SWITCH_ATTR_PORT_LIST;
+            attr.value.objlist.count = (uint32_t)portOids.size();
+            attr.value.objlist.list = portOids.data();
+            status = sai_switch_api->get_switch_attribute(gSwitchId, 1, &attr);
+            ASSERT_EQ(status, SAI_STATUS_SUCCESS);
+            
+            deque<KeyOpFieldsValuesTuple> port_init_tuple;
+            for (auto i = 0; i < port_count; i++) {
+                vector<sai_uint32_t> lanes(8, 0);
+                attr.id = SAI_PORT_ATTR_HW_LANE_LIST;
+                attr.value.u32list.count = lanes.size();
+                attr.value.u32list.list = lanes.data();
+            
+                status = sai_port_api->get_port_attribute(portOids[i], 1, &attr);
+                ASSERT_EQ(status, SAI_STATUS_SUCCESS);
+            
+                ostringstream lan_map_oss;
+                lanes.resize(attr.value.u32list.count);
+                if (!lanes.empty()) {
+                    copy(lanes.begin(), lanes.end() - 1, ostream_iterator<sai_uint32_t>(lan_map_oss, ","));
+                    lan_map_oss << lanes.back();
+                }
+            
+                port_init_tuple.push_back(
+                    { "Ethernet" + to_string(i), SET_COMMAND, { { "lanes", lan_map_oss.str() }} });
+            }
+            
+            port_init_tuple.push_back({ "PortConfigDone", SET_COMMAND, { { "count", to_string(port_count) } } });
+            port_init_tuple.push_back({ "PortInitDone", EMPTY_PREFIX, { { "", "" } } });
+            Portal::ConsumerInternal::addToSync(consumer.get(), port_init_tuple);
+            
+            static_cast<Orch*>(gPortsOrch)->doTask(*consumer.get());
             ASSERT_TRUE(gPortsOrch->isInitDone());
+
         }
 
         bool validate_vxlan_tunnel(sai_object_type_t objecttype, vector<sai_attribute_t> exp_attrlist, sai_object_id_t object_id, sai_route_entry_t *route_entry = nullptr)
@@ -287,6 +346,7 @@ namespace VnetOrchTest
                 auto meta = sai_metadata_get_attr_metadata(objecttype, attr.id);
     
                 if (meta == nullptr) {
+                                    _dbg_;
                     return false;
                 }
     
@@ -356,7 +416,6 @@ namespace VnetOrchTest
                 default:
                     return false;
             }
-            
             auto b_attr_eq = AttrListEq_for_two_sai_attr(objecttype, act_attr, exp_attrlist);
             if (!b_attr_eq) {
                  _dbg_;
@@ -572,7 +631,6 @@ namespace VnetOrchTest
 
         bool create_vlan_interface(int vlan_id, string ifname, string vnet_name, string ipaddr)
         {
-            port_table_init();
             //create vlan
             string vlan_name = "Vlan" + to_string(vlan_id);
             auto vlan_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VLAN_TABLE_NAME, 1, 1), gPortsOrch, APP_VLAN_TABLE_NAME));
@@ -625,18 +683,64 @@ namespace VnetOrchTest
             gPortsOrch->doTask(*vlan_intf_consumer.get());    
             return true;
         }
+
+
+        bool create_phy_interface(string ifname, string vnet_name, string ipaddr)
+        {
+            string name = ifname + "|" + ipaddr;
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, 1, 1), gPortsOrch, APP_PORT_TABLE_NAME));
+            
+            auto setData = deque<KeyOpFieldsValuesTuple>(
+                    { { ifname,
+                        SET_COMMAND,
+                        {
+                            {"vnet_name",  vnet_name},
+                            {"mtu", "9100"}     
+                        }
+                    } });
+            Portal::ConsumerInternal::addToSync(consumer.get(),setData);
+            gPortsOrch->doTask(*consumer.get()); 
+
+            auto intf_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_INTF_TABLE_NAME, 1, 1), gIntfsOrch, APP_INTF_TABLE_NAME));
+            auto intf_setData = deque<KeyOpFieldsValuesTuple>(
+                    { { ifname,
+                        SET_COMMAND,
+                        {
+                            {"vnet_name",  vnet_name},
+                        }
+                    } });  
+            
+            Portal::ConsumerInternal::addToSync(intf_consumer.get(),intf_setData);
+            gIntfsOrch->doTask(*intf_consumer.get());   
+            
+            auto setData_family = deque<KeyOpFieldsValuesTuple>(
+                    { { name,
+                        SET_COMMAND,
+                        {
+                            {"family",  "IPv4"},
+                        }
+                    } });
+            Portal::ConsumerInternal::addToSync(consumer.get(),setData_family);
+            gPortsOrch->doTask(*consumer.get()); 
+            
+            return true;
+        }
         
-        bool check_router_interface(string name, int vlan){
+        bool check_router_interface(string name, int vlan=0, string if_name=""){
             //Check RIF in ingress VRF
 
             auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
-            string vlan_name = "Vlan" + to_string(vlan);
+            string vlan_name;
             sai_object_id_t vlan_oid;
             Port port;
-            
-            gPortsOrch->getPort(vlan_name, port);
-            vlan_oid = port.m_vlan_info.vlan_oid;
 
+            if(vlan){
+                vlan_name = "Vlan" + to_string(vlan);
+                gPortsOrch->getPort(vlan_name, port);
+                vlan_oid = port.m_vlan_info.vlan_oid;
+            }else{
+                gPortsOrch->getPort(if_name, port);
+            }
 
             sai_attribute_t attr;
             std::vector<sai_attribute_t> attrs;
@@ -653,7 +757,7 @@ namespace VnetOrchTest
             attr.value.u32 = 9100;
             attrs.push_back(attr);
 
-            if(vlan_oid)
+            if(vlan)
             {
                 attr.id = SAI_ROUTER_INTERFACE_ATTR_TYPE;
                 attr.value.s32 = SAI_ROUTER_INTERFACE_TYPE_VLAN;
@@ -670,8 +774,10 @@ namespace VnetOrchTest
                 attrs.push_back(attr);            
             }
             
-            if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTER_INTERFACE, attrs, port.m_rif_id) == false)
+            if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTER_INTERFACE, attrs, port.m_rif_id) == false){
                 return false;
+            }
+            return true;
 
         }
         
@@ -814,43 +920,26 @@ namespace VnetOrchTest
 
         
         ASSERT_TRUE(create_vnet_local_routes("100.100.3.0/24", "Vnet_2000", "Vlan100")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true);
         ASSERT_TRUE(create_vnet_local_routes("100.100.4.0/24", "Vnet_2000", "Vlan101")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true);
 
         //Create Physical Interface in another Vnet
+        
         ASSERT_TRUE(create_vnet_entry("Vnet_2001", tunnel_name, "2001", "")== true);
-        ASSERT_TRUE(create_vlan_interface(100, "Ethernet4", "Vnet_2001", "100.102.1.1/24")== true);
+        //vnet_obj.check_vnet_entry(dvs, 'Vnet_2000')
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2001", 2001)== true);
+
+        
+        ASSERT_TRUE(create_phy_interface("Ethernet4", "Vnet_2001", "100.102.1.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_2001",0,"Ethernet4")== true);
+        
         ASSERT_TRUE(create_vnet_routes("100.100.2.1/32", "Vnet_2001", "10.10.10.2", "00:12:34:56:78:9A")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_2001", "10.10.10.2", tunnel_name,"100.100.2.1/32","00:12:34:56:78:9A")== true);
+
+                
         ASSERT_TRUE(create_vnet_local_routes("100.102.1.0/24", "Vnet_2001", "Ethernet4")== true);  
-
-
-  /* 
-    
-    
-    create_vnet_local_routes(dvs, "100.100.3.0/24", 'Vnet_2000', 'Vlan100')
-    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2000')
-    
-    create_vnet_local_routes(dvs, "100.100.4.0/24", 'Vnet_2000', 'Vlan101')
-    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2000')
-    
-#Create Physical Interface in another Vnet
-    
-    create_vnet_entry(dvs, 'Vnet_2001', tunnel_name, '2001', "")
-    
-    vnet_obj.check_vnet_entry(dvs, 'Vnet_2001')
-    vnet_obj.check_vxlan_tunnel_entry(dvs, tunnel_name, 'Vnet_2001', '2001')
-    
-    create_phy_interface(dvs, "Ethernet4", "Vnet_2001", "100.102.1.1/24")
-    vnet_obj.check_router_interface(dvs, 'Vnet_2001')
-    
-    create_vnet_routes(dvs, "100.100.2.1/32", 'Vnet_2001', '10.10.10.2', "00:12:34:56:78:9A")
-    vnet_obj.check_vnet_routes(dvs, 'Vnet_2001', '10.10.10.2', tunnel_name, "00:12:34:56:78:9A")
-    
-    create_vnet_local_routes(dvs, "100.102.1.0/24", 'Vnet_2001', 'Ethernet4')
-    vnet_obj.check_vnet_local_routes(dvs, 'Vnet_2001')*/
-
-
-
-
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2001")== true);
 
     }
 
