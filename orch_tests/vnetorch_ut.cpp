@@ -196,16 +196,22 @@ namespace VnetOrchTest
                     vnet_orch = new VNetOrch(m_applDb.get(), APP_VNET_TABLE_NAME);
                 }
                 gDirectory.set(vnet_orch);
+            }else{
+                vnet_orch = gDirectory.get<VNetOrch*>();
             }
             
             if(!gDirectory.get<VNetRouteOrch*>()){
                 vnet_rt_orch = new VNetRouteOrch(m_applDb.get(), vnet_tables, vnet_orch);
                 gDirectory.set(vnet_rt_orch);
+            }else{
+                vnet_rt_orch = gDirectory.get<VNetRouteOrch*>();
             }
                         
             if(!gDirectory.get<VRFOrch*>()){
                 vrf_orch = new VRFOrch(m_applDb.get(), APP_VRF_TABLE_NAME);
                 gDirectory.set(vrf_orch);
+            }else{
+                vrf_orch = gDirectory.get<VRFOrch*>();
             }
             
             gIntfsOrch = new IntfsOrch(m_applDb.get(), APP_INTF_TABLE_NAME, vrf_orch);
@@ -213,6 +219,8 @@ namespace VnetOrchTest
             if(!gDirectory.get<VxlanTunnelOrch*>()){
                 vxlan_tunnel_orch = new VxlanTunnelOrch(m_applDb.get(), APP_VXLAN_TUNNEL_TABLE_NAME);
                 gDirectory.set(vxlan_tunnel_orch);
+            }else{
+                vxlan_tunnel_orch = gDirectory.get<VxlanTunnelOrch*>();
             }
 
             vector<string> buffer_tables = {
@@ -233,10 +241,10 @@ namespace VnetOrchTest
         {
             delete gPortsOrch;
             delete gIntfsOrch;
-            delete vxlan_tunnel_orch;
-            delete vrf_orch;
-            delete vnet_rt_orch;
-            delete vnet_orch;            
+            //delete vxlan_tunnel_orch;
+            //delete vrf_orch;
+            //delete vnet_rt_orch;
+            //delete vnet_orch;            
             ASSERT_TRUE(orchgent_stub.saiUnInit() == SAI_STATUS_SUCCESS);
         }
 
@@ -346,7 +354,6 @@ namespace VnetOrchTest
                 auto meta = sai_metadata_get_attr_metadata(objecttype, attr.id);
     
                 if (meta == nullptr) {
-                                    _dbg_;
                     return false;
                 }
     
@@ -412,13 +419,19 @@ namespace VnetOrchTest
                         return false;
                     }
                     break;
-                     
+                    
+                  case SAI_OBJECT_TYPE_VIRTUAL_ROUTER:
+                    status = sai_virtual_router_api->get_virtual_router_attribute(object_id, (uint32_t)act_attr.size(),  act_attr.data());
+                    if (status != SAI_STATUS_SUCCESS) {
+                         return false;
+                    }
+                    break; 
+                    
                 default:
                     return false;
             }
             auto b_attr_eq = AttrListEq_for_two_sai_attr(objecttype, act_attr, exp_attrlist);
             if (!b_attr_eq) {
-                 _dbg_;
                 return false;
             }
     
@@ -441,6 +454,7 @@ namespace VnetOrchTest
 
             if(vxlan_tunnel_orch->vxlan_tunnel_table_.find(tunnel_name)== vxlan_tunnel_orch->vxlan_tunnel_table_.end())
                 return false;
+
             return true;
 
         }
@@ -628,7 +642,15 @@ namespace VnetOrchTest
 
         }
 
-
+        bool check_vnet_entry(string name)
+        {
+            //check asic db size
+            
+          /* if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_VIRTUAL_ROUTER, attrs, port.m_rif_id ) == false)
+             return false;
+          */
+        }
+        
         bool create_vlan_interface(int vlan_id, string ifname, string vnet_name, string ipaddr)
         {
             //create vlan
@@ -898,14 +920,14 @@ namespace VnetOrchTest
     };
 
     //Test 1 - Create Vlan Interface, Tunnel and Vnet
-    TEST_F(VnetOrchTest, Vnet_Creation)
+    TEST_F(VnetOrchTest, test_vnet_orch_1)
     {
         string tunnel_name = "tunnel_1";
 
         ASSERT_TRUE(create_vxlan_tunnel(tunnel_name, "10.10.10.10") == true);
         ASSERT_TRUE(create_vnet_entry("Vnet_2000", tunnel_name, "2000", "")== true);
 
-        //vnet_obj.check_vnet_entry(dvs, 'Vnet_2000')
+        //check_vnet_entry("Vnet_2000");
         ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2000", 2000)== true);
         ASSERT_TRUE(check_vxlan_tunnel(tunnel_name, "10.10.10.10")== true);
         
@@ -920,14 +942,14 @@ namespace VnetOrchTest
 
         
         ASSERT_TRUE(create_vnet_local_routes("100.100.3.0/24", "Vnet_2000", "Vlan100")== true);
-        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true); //check asic size
         ASSERT_TRUE(create_vnet_local_routes("100.100.4.0/24", "Vnet_2000", "Vlan101")== true);
-        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2000")== true); //check asic size
 
         //Create Physical Interface in another Vnet
         
         ASSERT_TRUE(create_vnet_entry("Vnet_2001", tunnel_name, "2001", "")== true);
-        //vnet_obj.check_vnet_entry(dvs, 'Vnet_2000')
+        //check_vnet_entry(dvs, 'Vnet_2000')
         ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2001", 2001)== true);
 
         
@@ -943,32 +965,54 @@ namespace VnetOrchTest
 
     }
 
-#if 0    
+#if 1    
     //Test 2 - Two VNets, One HSMs per VNet
 
     TEST_F(VnetOrchTest,test_vnet_orch_2)
     {
         string tunnel_name = "tunnel_2";
         ASSERT_TRUE(create_vxlan_tunnel(tunnel_name, "6.6.6.6") == true);
+        ASSERT_TRUE(create_vnet_entry("Vnet_1", tunnel_name, "1111", "")== true);
+
+        //check_vnet_entry("Vnet_1"); 
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_1", 1111)== true);
+        ASSERT_TRUE(check_vxlan_tunnel(tunnel_name, "6.6.6.6")== true);
+        
         ASSERT_TRUE(create_vlan_interface(1001, "Ethernet0", "Vnet_1", "1.1.10.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_1", 1001)== true);
+
+        
         ASSERT_TRUE(create_vnet_routes("1.1.1.10/32", "Vnet_1", "100.1.1.10")== true);
-    
+        ASSERT_TRUE(check_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name,"1.1.1.10/32")== true);
+        
         ASSERT_TRUE(create_vnet_routes("1.1.1.11/32", "Vnet_1", "100.1.1.10")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name,"1.1.1.11/32")== true);        
     
         ASSERT_TRUE(create_vnet_routes("1.1.1.12/32", "Vnet_1", "200.200.1.200")== true);
-    
+        ASSERT_TRUE(check_vnet_routes("Vnet_1", "200.200.1.200", tunnel_name,"1.1.1.12/32")== true);
+      
         ASSERT_TRUE(create_vnet_routes("1.1.1.14/32", "Vnet_1", "200.200.1.201")== true);
-    
+        ASSERT_TRUE(check_vnet_routes("Vnet_1", "200.200.1.201", tunnel_name,"1.1.1.14/32")== true);  
+        
         ASSERT_TRUE(create_vnet_local_routes("1.1.10.0/24", "Vnet_1", "Vlan1001")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_1")== true); //check asic size
+        
         ASSERT_TRUE(create_vnet_entry("Vnet_2", tunnel_name, "2222", "")== true);
-    
-        ASSERT_TRUE(create_vlan_interface(1002, "Ethernet4", "Vnet_2", "2.2.10.1/24")== true);
-        ASSERT_TRUE(create_vnet_routes("2.2.2.10/32", "Vnet_2", "100.1.1.20")== true);
-    
-        ASSERT_TRUE(create_vnet_routes("2.2.2.11/32", "Vnet_2", "100.1.1.20")== true);
-        ASSERT_TRUE(create_vnet_local_routes( "2.2.10.0/24", "Vnet_2", "Vlan1002")== true);
-    }
+        //check_vnet_entry("Vnet_2"); 
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_2", 2222)== true);
 
+        ASSERT_TRUE(create_vlan_interface(1002, "Ethernet4", "Vnet_2", "2.2.10.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_2", 1002)== true);
+                
+        ASSERT_TRUE(create_vnet_routes("2.2.2.10/32", "Vnet_2", "100.1.1.20")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name,"2.2.2.10/32")== true);  
+        
+        ASSERT_TRUE(create_vnet_routes("2.2.2.11/32", "Vnet_2", "100.1.1.20")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name,"2.2.2.11/32")== true); 
+                
+        ASSERT_TRUE(create_vnet_local_routes( "2.2.10.0/24", "Vnet_2", "Vlan1002")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_2")== true); //check asic size
+    }
 
     //Test 3 - Two VNets, One HSMs per VNet, Peering
     TEST_F(VnetOrchTest,test_vnet_orch_3)
@@ -979,20 +1023,35 @@ namespace VnetOrchTest
         ASSERT_TRUE(create_vxlan_tunnel(tunnel_name, "7.7.7.7")== true);
 
         ASSERT_TRUE(create_vnet_entry("Vnet_10", tunnel_name, "3333", "Vnet_20")== true);
-
+        //check_vnet_entry("Vnet_10",{"Vnet_20"}); 
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_10", 3333)== true);
+        
         ASSERT_TRUE(create_vnet_entry("Vnet_20", tunnel_name, "4444", "Vnet_10")== true);
+        //check_vnet_entry("Vnet_20",{"Vnet_10"}); 
+        ASSERT_TRUE(check_vxlan_tunnel_entry(tunnel_name, "Vnet_20", 4444)== true);
+        ASSERT_TRUE(check_vxlan_tunnel(tunnel_name, "7.7.7.7")== true);
+           
         ASSERT_TRUE(create_vlan_interface(2001, "Ethernet8", "Vnet_10", "5.5.10.1/24")== true);
-
+        ASSERT_TRUE(check_router_interface("Vnet_10", 2001)== true);
+        
         ASSERT_TRUE(create_vlan_interface(2002, "Ethernet12", "Vnet_20", "8.8.10.1/24")== true);
+        ASSERT_TRUE(check_router_interface("Vnet_20", 2002)== true);
+        
 
         ASSERT_TRUE(create_vnet_routes("5.5.5.10/32", "Vnet_10", "50.1.1.10")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_10", "50.1.1.10", tunnel_name,"5.5.5.10/32")== true); 
 
         ASSERT_TRUE(create_vnet_routes( "8.8.8.10/32", "Vnet_20", "80.1.1.20")== true);
+        ASSERT_TRUE(check_vnet_routes("Vnet_10", "80.1.1.20", tunnel_name,"8.8.8.10/32")== true); 
 
         ASSERT_TRUE(create_vnet_local_routes("5.5.10.0/24", "Vnet_10", "Vlan2001")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_10")== true); //check asic size
 
         ASSERT_TRUE(create_vnet_local_routes("8.8.10.0/24", "Vnet_20", "Vlan2002")== true);
+        // ASSERT_TRUE(check_vnet_local_routes("Vnet_20")== true); //check asic size
+        
     }
- #endif   
+ #endif
+ 
 }
 
