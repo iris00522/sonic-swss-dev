@@ -661,8 +661,6 @@ namespace VnetOrchTest
 
             Portal::ConsumerInternal::addToSync(vnet_consumer.get(), setData);
             vnet_orch->doTask(*vnet_consumer.get());
-            if (vnet_orch->vnet_table_.find(name) == vnet_orch->vnet_table_.end())
-                return false;
             return true;
         }
 
@@ -672,6 +670,9 @@ namespace VnetOrchTest
             sai_attribute_t attr;
             std::vector<sai_attribute_t> attrs;
             MacAddress mac = MacAddress(mac_string);
+
+            if (vnet_orch->vnet_table_.find(name) == vnet_orch->vnet_table_.end())
+                return false;
 
             attr.id = SAI_VIRTUAL_ROUTER_ATTR_SRC_MAC_ADDRESS;
             memcpy(attr.value.mac, mac.getMac(), sizeof(sai_mac_t));
@@ -795,16 +796,23 @@ namespace VnetOrchTest
             string vlan_name;
             sai_object_id_t vlan_oid;
             Port port;
+            string intfs_name;
 
             if (vlan)
             {
-                vlan_name = "Vlan" + to_string(vlan);
+                intfs_name = vlan_name = "Vlan" + to_string(vlan);
                 gPortsOrch->getPort(vlan_name, port);
                 vlan_oid = port.m_vlan_info.vlan_oid;
             }
             else
             {
                 gPortsOrch->getPort(if_name, port);
+                intfs_name = if_name;
+            }
+
+            if (gIntfsOrch->m_vnetInfses.find(intfs_name) == gIntfsOrch->m_vnetInfses.end())
+            {
+                return false;
             }
 
             sai_attribute_t attr;
@@ -874,7 +882,22 @@ namespace VnetOrchTest
             return true;
         }
 
-        bool check_vnet_routes(string name, string endpoint, string tunnel, string prefix, string mac = "", int vni = 0)
+        bool remove_vnet_routes(string prefix, string vnet_name)
+        {
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VNET_RT_TUNNEL_TABLE_NAME, 1, 1), vnet_rt_orch, APP_VNET_RT_TUNNEL_TABLE_NAME));
+            string name = vnet_name + ":" + prefix;
+
+            auto setDatas = deque<KeyOpFieldsValuesTuple>(
+                { { name,
+                    DEL_COMMAND,
+                    {} } });
+            Portal::ConsumerInternal::addToSync(consumer.get(), setDatas);
+            vnet_rt_orch->doTask(*consumer.get());
+
+            return true;
+        }
+
+        bool check_create_vnet_routes(string name, string endpoint, string tunnel, string prefix, string mac = "", int vni = 0)
         {
             auto tunnel_obj = vxlan_tunnel_orch->getVxlanTunnel(tunnel);
             sai_object_id_t tunnel_id = tunnel_obj->getTunnelId();
@@ -882,6 +905,7 @@ namespace VnetOrchTest
             MacAddress tunnel_mac = mac != "" ? MacAddress(mac) : gVxlanMacAddress;
             sai_object_id_t nh_id = tunnel_obj->getNextHop(endpoint_ip, tunnel_mac, vni);
             auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+            IpPrefix ip_prefix = IpPrefix(prefix);
 
             // Check routes in ingress VRF
             {
@@ -920,6 +944,10 @@ namespace VnetOrchTest
                     return false;
             }
 
+            if (vnet_obj->tunnels_.find(ip_prefix) == vnet_obj->tunnels_.end())
+            {
+                return false;
+            }
             //Check if the route is in expected VRF
             {
                 sai_attribute_t attr;
@@ -927,7 +955,6 @@ namespace VnetOrchTest
                 sai_route_entry_t route_entry;
                 route_entry.vr_id = vnet_obj->getVRidIngress();
                 route_entry.switch_id = gSwitchId;
-                IpPrefix ip_prefix = IpPrefix(prefix);
                 copy(route_entry.destination, ip_prefix);
 
                 attr.id = SAI_ROUTE_ENTRY_ATTR_NEXT_HOP_ID;
@@ -936,6 +963,18 @@ namespace VnetOrchTest
 
                 if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTE_ENTRY, attrs, 0, &route_entry) == false)
                     return false;
+            }
+            return true;
+        }
+
+        bool check_remove_vnet_routes(string name, string prefix)
+        {
+            auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+            IpPrefix ip_prefix = IpPrefix(prefix);
+
+            if (vnet_obj->tunnels_.find(ip_prefix) == vnet_obj->tunnels_.end())
+            {
+                return false;
             }
             return true;
         }
@@ -957,21 +996,36 @@ namespace VnetOrchTest
             return true;
         }
 
-        bool check_vnet_local_routes(string name, string ifname, string prefix)
+        bool remove_vnet_local_routes(string vnet_name, string prefix)
+        {
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VNET_RT_TABLE_NAME, 1, 1), vnet_rt_orch, APP_VNET_RT_TABLE_NAME));
+            string name = vnet_name + ":" + prefix;
+
+            auto setData = deque<KeyOpFieldsValuesTuple>(
+                { { name,
+                    DEL_COMMAND,
+                    {} } });
+
+            Portal::ConsumerInternal::addToSync(consumer.get(), setData);
+            vnet_rt_orch->doTask(*consumer.get());
+            return true;
+        }
+
+        bool check_create_vnet_local_routes(string name, string ifname, string prefix)
         {
             auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+            IpPrefix ip_prefix = IpPrefix(prefix);
 
-            //Check if the route is in expected VRF
+            if (vnet_obj->routes_.find(ip_prefix) == vnet_obj->routes_.end())
+                return false;
             {
                 sai_attribute_t attr;
                 std::vector<sai_attribute_t> attrs;
                 sai_route_entry_t route_entry;
                 route_entry.vr_id = vnet_obj->getVRidEgress();
                 route_entry.switch_id = gSwitchId;
-                IpPrefix ip_prefix = IpPrefix(prefix);
                 copy(route_entry.destination, ip_prefix);
                 Port port;
-
                 if (!gPortsOrch->getPort(ifname, port) || (port.m_rif_id == SAI_NULL_OBJECT_ID))
                 {
                     return false;
@@ -982,6 +1036,16 @@ namespace VnetOrchTest
                 if (validate_vxlan_tunnel(SAI_OBJECT_TYPE_ROUTE_ENTRY, attrs, 0, &route_entry) == false)
                     return false;
             }
+            return true;
+        }
+
+        bool check_remove_vnet_local_routes(string name, string prefix)
+        {
+            auto *vnet_obj = vnet_orch->getTypePtr<VNetVrfObject>(name);
+            IpPrefix ip_prefix = IpPrefix(prefix);
+
+            if (vnet_obj->routes_.find(ip_prefix) != vnet_obj->routes_.end())
+                return false;
             return true;
         }
     };
@@ -1005,12 +1069,12 @@ namespace VnetOrchTest
         ASSERT_TRUE(check_router_interface("Vnet_2000", 101) == true);
 
         ASSERT_TRUE(create_vnet_routes("100.100.1.1/32", "Vnet_2000", "10.10.10.1") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_2000", "10.10.10.1", tunnel_name, "100.100.1.1/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_2000", "10.10.10.1", tunnel_name, "100.100.1.1/32") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("100.100.3.0/24", "Vnet_2000", "Vlan100") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_2000", "Vlan100", "100.100.3.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_2000", "Vlan100", "100.100.3.0/24") == true);
         ASSERT_TRUE(create_vnet_local_routes("100.100.4.0/24", "Vnet_2000", "Vlan101") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_2000", "Vlan101", "100.100.4.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_2000", "Vlan101", "100.100.4.0/24") == true);
 
         //Create Physical Interface in another Vnet
 
@@ -1022,10 +1086,17 @@ namespace VnetOrchTest
         ASSERT_TRUE(check_router_interface("Vnet_2001", 0, "Ethernet4") == true);
 
         ASSERT_TRUE(create_vnet_routes("100.100.2.1/32", "Vnet_2001", "10.10.10.2", "00:12:34:56:78:9A") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_2001", "10.10.10.2", tunnel_name, "100.100.2.1/32", "00:12:34:56:78:9A") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_2001", "10.10.10.2", tunnel_name, "100.100.2.1/32", "00:12:34:56:78:9A") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("100.102.1.0/24", "Vnet_2001", "Ethernet4") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_2001", "Ethernet4", "100.102.1.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_2001", "Ethernet4", "100.102.1.0/24") == true);
+
+        //remove
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_2001", "100.102.1.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_2001", "100.102.1.0/24") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_2001", "100.100.2.1/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_2001", "100.100.2.1/32") == true);
     }
 
 #if 1
@@ -1045,19 +1116,19 @@ namespace VnetOrchTest
         ASSERT_TRUE(check_router_interface("Vnet_1", 1001) == true);
 
         ASSERT_TRUE(create_vnet_routes("1.1.1.10/32", "Vnet_1", "100.1.1.10") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name, "1.1.1.10/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name, "1.1.1.10/32") == true);
 
         ASSERT_TRUE(create_vnet_routes("1.1.1.11/32", "Vnet_1", "100.1.1.10") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name, "1.1.1.11/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_1", "100.1.1.10", tunnel_name, "1.1.1.11/32") == true);
 
         ASSERT_TRUE(create_vnet_routes("1.1.1.12/32", "Vnet_1", "200.200.1.200") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_1", "200.200.1.200", tunnel_name, "1.1.1.12/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_1", "200.200.1.200", tunnel_name, "1.1.1.12/32") == true);
 
         ASSERT_TRUE(create_vnet_routes("1.1.1.14/32", "Vnet_1", "200.200.1.201") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_1", "200.200.1.201", tunnel_name, "1.1.1.14/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_1", "200.200.1.201", tunnel_name, "1.1.1.14/32") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("1.1.10.0/24", "Vnet_1", "Vlan1001") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_1", "Vlan1001", "1.1.10.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_1", "Vlan1001", "1.1.10.0/24") == true);
 
         ASSERT_TRUE(create_vnet_entry("Vnet_2", tunnel_name, "2222", "", "04:04:06:07:08:0A") == true);
         ASSERT_TRUE(check_vnet_entry("Vnet_2", "04:04:06:07:08:0A") == true);
@@ -1067,13 +1138,23 @@ namespace VnetOrchTest
         ASSERT_TRUE(check_router_interface("Vnet_2", 1002) == true);
 
         ASSERT_TRUE(create_vnet_routes("2.2.2.10/32", "Vnet_2", "100.1.1.20") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name, "2.2.2.10/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name, "2.2.2.10/32") == true);
 
         ASSERT_TRUE(create_vnet_routes("2.2.2.11/32", "Vnet_2", "100.1.1.20") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name, "2.2.2.11/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_2", "100.1.1.20", tunnel_name, "2.2.2.11/32") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("2.2.10.0/24", "Vnet_2", "Vlan1002") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_2", "Vlan1002", "2.2.10.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_2", "Vlan1002", "2.2.10.0/24") == true);
+
+        //remove
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_2", "2.2.10.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_2", "2.2.10.0/24") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_2", "2.2.2.10/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_2", "2.2.2.10/32") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_2", "2.2.2.11/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_2", "2.2.2.11/32") == true);
     }
 
     //Test 3 - Two VNets, One HSMs per VNet, Peering
@@ -1100,16 +1181,28 @@ namespace VnetOrchTest
         ASSERT_TRUE(check_router_interface("Vnet_20", 2002) == true);
 
         ASSERT_TRUE(create_vnet_routes("5.5.5.10/32", "Vnet_10", "50.1.1.10") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_10", "50.1.1.10", tunnel_name, "5.5.5.10/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_10", "50.1.1.10", tunnel_name, "5.5.5.10/32") == true);
 
         ASSERT_TRUE(create_vnet_routes("8.8.8.10/32", "Vnet_20", "80.1.1.20") == true);
-        ASSERT_TRUE(check_vnet_routes("Vnet_10", "80.1.1.20", tunnel_name, "8.8.8.10/32") == true);
+        ASSERT_TRUE(check_create_vnet_routes("Vnet_20", "80.1.1.20", tunnel_name, "8.8.8.10/32") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("5.5.10.0/24", "Vnet_10", "Vlan2001") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_10", "Vlan2001", "5.5.10.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_10", "Vlan2001", "5.5.10.0/24") == true);
 
         ASSERT_TRUE(create_vnet_local_routes("8.8.10.0/24", "Vnet_20", "Vlan2002") == true);
-        ASSERT_TRUE(check_vnet_local_routes("Vnet_20", "Vlan2002", "8.8.10.0/24") == true);
+        ASSERT_TRUE(check_create_vnet_local_routes("Vnet_20", "Vlan2002", "8.8.10.0/24") == true);
+
+        //remove
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_20", "8.8.10.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_20", "8.8.10.0/24") == true);
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_10", "5.5.10.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_10", "5.5.10.0/24") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_10", "5.5.5.10/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_10", "5.5.5.10/32") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_20", "8.8.8.10/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_20", "8.8.8.10/32") == true);
     }
 #endif
 }
