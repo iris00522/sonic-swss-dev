@@ -51,10 +51,12 @@ extern sai_virtual_router_api_t *sai_virtual_router_api;
 extern sai_router_interface_api_t *sai_router_intfs_api;
 extern sai_tunnel_api_t *sai_tunnel_api;
 extern sai_next_hop_api_t *sai_next_hop_api;
+extern sai_neighbor_api_t *sai_neighbor_api;
 
 extern PortsOrch *gPortsOrch;
 extern BufferOrch *gBufferOrch;
 extern IntfsOrch *gIntfsOrch;
+extern RouteOrch *gRouteOrch;
 
 extern Directory<Orch *> gDirectory;
 
@@ -247,6 +249,7 @@ namespace VnetOrchTest
                 CFG_BUFFER_PORT_EGRESS_PROFILE_LIST_NAME
             };
             gBufferOrch = new BufferOrch(m_configDb.get(), buffer_tables);
+            gRouteOrch = new RouteOrch(m_applDb.get(), APP_ROUTE_TABLE_NAME, gNeighOrch);
 
             port_table_init();
         }
@@ -255,6 +258,7 @@ namespace VnetOrchTest
         {
             delete gPortsOrch;
             delete gIntfsOrch;
+            delete gRouteOrch;
             //delete vxlan_tunnel_orch;
             //delete vrf_orch;
             //delete vnet_rt_orch;
@@ -739,8 +743,8 @@ namespace VnetOrchTest
             Portal::ConsumerInternal::addToSync(intf_consumer.get(), intf_setData);
             gIntfsOrch->doTask(*intf_consumer.get());
 
-            string intf_name = vlan_name + "|" + ipaddr;
-            auto vlan_intf_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_VLAN_MEMBER_TABLE_NAME, 1, 1), gPortsOrch, APP_VLAN_MEMBER_TABLE_NAME));
+            string intf_name = vlan_name + ":" + ipaddr;
+            auto vlan_intf_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_INTF_TABLE_NAME, 1, 1), gIntfsOrch, APP_INTF_TABLE_NAME));
             auto vlan_intf_setData = deque<KeyOpFieldsValuesTuple>(
                 { { intf_name,
                     SET_COMMAND,
@@ -748,22 +752,21 @@ namespace VnetOrchTest
                         { "family", "IPv4" },
                     } } });
             Portal::ConsumerInternal::addToSync(vlan_intf_consumer.get(), vlan_intf_setData);
-            gPortsOrch->doTask(*vlan_intf_consumer.get());
+            gIntfsOrch->doTask(*vlan_intf_consumer.get());
             return true;
         }
 
         bool create_phy_interface(string ifname, string vnet_name, string ipaddr)
         {
-            string name = ifname + "|" + ipaddr;
-            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, 1, 1), gPortsOrch, APP_PORT_TABLE_NAME));
 
+            auto consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_PORT_TABLE_NAME, 1, 1), gPortsOrch, APP_PORT_TABLE_NAME));
             auto setData = deque<KeyOpFieldsValuesTuple>(
                 { { ifname,
                     SET_COMMAND,
-                    { { "vnet_name", vnet_name },
-                      { "mtu", "9100" } } } });
+                    { { "mtu", "9100" } } } });
+
             Portal::ConsumerInternal::addToSync(consumer.get(), setData);
-            gPortsOrch->doTask(*consumer.get());
+            static_cast<Orch *>(gPortsOrch)->doTask(*consumer.get());
 
             auto intf_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_INTF_TABLE_NAME, 1, 1), gIntfsOrch, APP_INTF_TABLE_NAME));
             auto intf_setData = deque<KeyOpFieldsValuesTuple>(
@@ -776,14 +779,16 @@ namespace VnetOrchTest
             Portal::ConsumerInternal::addToSync(intf_consumer.get(), intf_setData);
             gIntfsOrch->doTask(*intf_consumer.get());
 
-            auto setData_family = deque<KeyOpFieldsValuesTuple>(
-                { { name,
+            string intf_name = ifname + ":" + ipaddr;
+            auto port_intf_consumer = unique_ptr<Consumer>(new Consumer(new ConsumerStateTable(m_applDb.get(), APP_INTF_TABLE_NAME, 1, 1), gIntfsOrch, APP_INTF_TABLE_NAME));
+            auto port_intf_setData = deque<KeyOpFieldsValuesTuple>(
+                { { intf_name,
                     SET_COMMAND,
                     {
                         { "family", "IPv4" },
                     } } });
-            Portal::ConsumerInternal::addToSync(consumer.get(), setData_family);
-            gPortsOrch->doTask(*consumer.get());
+            Portal::ConsumerInternal::addToSync(port_intf_consumer.get(), port_intf_setData);
+            gIntfsOrch->doTask(*port_intf_consumer.get());
 
             return true;
         }
@@ -1097,6 +1102,14 @@ namespace VnetOrchTest
 
         ASSERT_TRUE(remove_vnet_routes("Vnet_2001", "100.100.2.1/32") == true);
         ASSERT_TRUE(check_remove_vnet_routes("Vnet_2001", "100.100.2.1/32") == true);
+
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_2000", "100.100.3.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_2000", "100.100.3.0/24") == true);
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_2000", "100.100.4.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_2000", "100.100.4.0/24") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_2000", "100.100.1.1/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_2000", "100.100.1.1/32") == true);
     }
 
 #if 1
@@ -1155,6 +1168,21 @@ namespace VnetOrchTest
 
         ASSERT_TRUE(remove_vnet_routes("Vnet_2", "2.2.2.11/32") == true);
         ASSERT_TRUE(check_remove_vnet_routes("Vnet_2", "2.2.2.11/32") == true);
+
+        ASSERT_TRUE(remove_vnet_local_routes("Vnet_1", "1.1.10.0/24") == true);
+        ASSERT_TRUE(check_remove_vnet_local_routes("Vnet_1", "1.1.10.0/24") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_1", "1.1.1.14/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_1", "1.1.1.14/32") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_1", "1.1.1.12/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_1", "1.1.1.12/32") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_1", "1.1.1.10/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_1", "1.1.1.10/32") == true);
+
+        ASSERT_TRUE(remove_vnet_routes("Vnet_1", "1.1.1.11/32") == true);
+        ASSERT_TRUE(check_remove_vnet_routes("Vnet_1", "1.1.1.11/32") == true);
     }
 
     //Test 3 - Two VNets, One HSMs per VNet, Peering
